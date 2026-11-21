@@ -1,4 +1,5 @@
 #include "screen.h"
+#include "ui/masthead.h"
 
 namespace psychic
 {
@@ -7,14 +8,15 @@ namespace
 using hdui::Ink;
 using hdui::Raster;
 using namespace ParamId;
-constexpr Ink ground = 0xff24191e, film = 0xff140f17, panel = 0xff39272c, rule = 0xff765853;
-constexpr Ink paper = 0xffe8d9b6, light = 0xffffe7c8, muted = 0xffcdaea1, amber = 0xffffb373;
-constexpr Ink carbon = 0xff352c30, brick = 0xff943e31, pencil = 0xffc0ac89, teal = 0xff37706a;
-constexpr Ink hitInk[] = {carbon, 0xff864337, brick, 0xffbb4631, 0xffdc472b};
+constexpr Ink ground = 0xff0c0b1b, film = 0xff101023, panel = 0xff26213c, rule = 0xff615986;
+constexpr Ink paper = 0xffd9d7f2, light = 0xfff4f1ff, muted = 0xffbdb6d8, lime = 0xffd6fa51;
+constexpr Ink carbon = 0xff211a35, berry = 0xffa20d65, pencil = 0xff9c96b7, blueInk = 0xff285f83;
+constexpr Ink pink = 0xffff72bc, ice = 0xffa9c6ff, violet = 0xff7e71c4;
+constexpr Ink hitInk[] = {carbon, 0xff672d72, berry, 0xffc11c7e, 0xffde2087};
 constexpr uint32_t actions[] = {bitShift1, bitShift2, save, recall};
 constexpr const char* actionLabels[] = {"SHIFT A", "SHIFT B", "SAVE", "RECALL"};
 constexpr int cellCount = 16, choiceCount = cellCount + int (std::size (actions));
-constexpr int headerH = 27, topH = 68, bodyH = 90, footH = 33;
+constexpr int headerH = 42, topH = 60, bodyH = 86, footH = 30;
 static_assert (headerH + topH + bodyH + footH == hdui::height);
 
 uint32_t cvId (int cell)
@@ -42,15 +44,14 @@ int wrap (int value, int32_t delta, int n)
     return int (((int64_t (value) + delta) % n + n) % n);
 }
 
-void large (Raster& r, int x, int y, const char* text, Ink color, bool italic = false)
+void large (Raster& r, int x, int y, const char* text, Ink color)
 {
     for (; *text; ++text, x += 14)
     {
         const auto& glyph = hdui::font::glyphs[static_cast<unsigned char> (*text) - 32];
         for (int j = 0; j < hdui::font::glyphHeight; ++j)
             for (int k = 0; k < hdui::font::glyphWidth; ++k)
-                if (glyph[j] & (1 << k))
-                    r.box (x + 2 * k + (italic ? (10 - j) / 3 : 0), y + 2 * j, italic ? 3 : 2, 2, color);
+                if (glyph[j] & (1 << k)) r.box (x + 2 * k, y + 2 * j, 2, 2, color);
     }
 }
 
@@ -79,32 +80,48 @@ void shortValue (uint32_t id, float value, char (&text)[48])
         formatParam (p, value, text, sizeof (text));
 }
 
-// Sixteen exposure densities. Voltage moves the optical trace up and down; a punched gate exposes more of the film.
-constexpr Ink negative[] = {0xff251d25, 0xff322930, 0xff41363b, 0xff4d4246, 0xff5c5052, 0xff6a5d5e, 0xff786b6a, 0xff857976,
-                            0xff958783, 0xffa2958d, 0xffb0a399, 0xffbeb1a4, 0xffcbbdae, 0xffd7cbb8, 0xffe3d7c4, 0xffefe2ce};
-constexpr Ink positive[] = {0xff301b22, 0xff402028, 0xff512b30, 0xff623638, 0xff74413f, 0xff884c44, 0xff985a4e, 0xffac6858,
-                            0xffbb7862, 0xffcb876c, 0xffd89677, 0xffe1a581, 0xffedb38d, 0xfff5c69b, 0xffffd6af, 0xffffe6c4};
+// A band's centre is the stored voltage. Join adjacent frames at their mid-voltage.
+// The two reflective ridges print more brightly when a gate is open.
+constexpr Ink negative[] = {0xff17152b, 0xff211b36, 0xff2d2548, 0xff3a315d, 0xff4d4275, 0xff625495,
+                            0xff7569ab, 0xff8c7dc2, 0xffa595de, 0xffb8bafa, 0xffcadcff, 0xfff2f0ff};
+constexpr Ink positive[] = {0xff191628, 0xff28203b, 0xff402850, 0xff62315e, 0xff834370, 0xffa85c86,
+                            0xffc27d94, 0xffb49d7b, 0xffb8c968, 0xffd1ec61, 0xffe4ff7e, 0xfff4ffd4};
 
-void exposure (Raster& r, int x, int y, float cv, bool on, int cell, const Ink* inks)
+void exposure (Raster& r, int x, int y, float prev, float cv, float next, bool on, const Ink* inks)
 {
-    constexpr int wave[] = {0, 1, 1, 2, 2, 2, 1, 1, 0, -1, -1, -2, -2, -2, -1, -1};
-    const int baseline = 8 - int (std::lround (cv * 5));
+    auto level = [] (float voltage) { return 7 - int (std::lround (voltage * 4)); };
+    const int centre = level (cv);
+    const int entry = level ((prev + cv) * .5f), exit = level ((next + cv) * .5f);
+    constexpr int ridge[] = {1, 2, 4, 7, 11, 6, 3, 8, 2, 1};
     for (int dx = 0; dx < 16; ++dx)
     {
-        const int center = baseline + wave[(dx + cell * 3) % 16];
-        for (int dy = 0; dy < 17; ++dy)
+        const int point = dx < 8 ? ((8 - dx) * entry + dx * centre + 4) / 8 : ((15 - dx) * centre + (dx - 7) * exit + 4) / 8;
+        for (int dy = 0; dy < 14; ++dy)
         {
-            const int distance = std::abs (dy - center);
-            const int grain = ((dx * 5 + dy * 3 + cell) % 7 == 0) - ((dx + dy + cell) % 5 == 0);
-            const int density = (on ? 15 - 2 * distance : 5 - 2 * distance) + grain;
-            r.dot (x + dx, y + dy, inks[std::clamp (density, 0, 15)]);
+            const int d = dy - point;
+            int ink = d >= -4 && d <= 5 ? ridge[d + 4] : 0;
+            if (!on) ink /= 2;
+            if (!ink && (dx & 3) == 2 && (dy & 3) == 2) ink = 1;
+            r.dot (x + dx, y + dy, inks[ink]);
         }
     }
 }
 
+// Ticket corners and the clipped tabs share a three-pixel diagonal at panel scale.
+void clipped (Raster& r, int x, int y, int w, int h, Ink fill)
+{
+    r.box (x + 3, y, w - 3, 1, fill);
+    r.box (x + 2, y + 1, w - 2, 1, fill);
+    r.box (x + 1, y + 2, w - 1, 1, fill);
+    r.box (x, y + 3, w, h - 6, fill);
+    r.box (x, y + h - 3, w - 1, 1, fill);
+    r.box (x, y + h - 2, w - 2, 1, fill);
+    r.box (x, y + h - 1, w - 3, 1, fill);
+}
+
 void punch (Raster& r, int x, int y, bool on, bool enabled)
 {
-    const Ink outline = enabled ? pencil : 0xffcebea0;
+    const Ink outline = enabled ? pencil : 0xffbdb8ce;
     if (on)
     {
         r.box (x, y + 1, 8, 9, enabled ? carbon : pencil);
@@ -219,32 +236,30 @@ bool Screen::input (const melodee_screen_input_t& e, Edit& out)
 
 void Screen::header (Raster& r) const
 {
-    large (r, 5, 5, "PSYCHIC", light, true);
-    r.box (111, 5, 1, 16, rule);
-    char name[16];
-    if (inspector)
+    for (int y = 0; y < masthead::height; ++y)
+        for (int x = 0; x < masthead::width; ++x)
+            r.px[y * r.w + x] = masthead::palette[masthead::pixels[y * masthead::width + x]];
+
+    constexpr int tab = 218;
+    r.text (tab + 3, 6, inspector ? "CELL EDITOR" : group ? groups[group] : "CONTACT SHEET", light);
+    char focus[24];
+    if (selection < cellCount && !group)
     {
+        char name[16];
         cellLabel (name, selection);
-        r.text (122, 8, "CELL", muted);
-        r.text (159, 8, name, amber);
+        std::snprintf (focus, sizeof (focus), inspector ? "%s" : "PUSH %s", name);
     }
+    else if (!group)
+        std::snprintf (focus, sizeof (focus), "PUSH %s", actionLabels[selection - cellCount]);
     else
-        r.text (122, 8, group ? groups[group] : "CONTACT SHEET", muted);
-    if (!group && !inspector)
-    {
-        char focus[24];
-        if (selection < cellCount)
-        {
-            cellLabel (name, selection);
-            std::snprintf (focus, sizeof (focus), "PUSH %s", name);
-        }
-        else
-            std::snprintf (focus, sizeof (focus), "PUSH %s", actionLabels[selection - cellCount]);
-        r.right (312, 8, focus, amber);
-    }
-    else
-        r.right (312, 8, live[ParamId::chain] > .5f ? "CHAIN" : clockDivChoices[int (live[ParamId::clockDiv])], amber);
-    r.box (5, 25, 310, 1, rule);
+        std::snprintf (focus, sizeof (focus), "%s",
+                       live[ParamId::chain] > .5f ? "CHAIN" : clockDivChoices[int (live[ParamId::clockDiv])]);
+    clipped (r, tab, 19, 97, 15, inspector ? ice : lime);
+    r.text (tab + 5, 23, focus, carbon);
+    if (inspector)
+        r.right (310, 23, live[ParamId::chain] > .5f ? "CHAIN" : clockDivChoices[int (live[ParamId::clockDiv])], carbon);
+    r.box (5, 39, 310, 1, rule);
+    r.box (5, 39, 38, 1, ice);
 }
 
 void Screen::films (Raster& r) const
@@ -255,7 +270,9 @@ void Screen::films (Raster& r) const
     for (int side = 0; side < 2; ++side)
     {
         const int left = 5 + side * 156;
-        r.text (left + 2, 2, side ? "LIVE" : "SAVED", side ? amber : muted);
+        const Ink ink = side ? lime : ice;
+        clipped (r, left, 0, side ? 38 : 45, 13, ink);
+        r.text (left + 5, 3, side ? "LIVE" : "SAVED", carbon);
         char status[24];
         if (side && haveMemory)
             std::snprintf (status, sizeof (status), "%d CHANGED", diff);
@@ -263,45 +280,50 @@ void Screen::films (Raster& r) const
             std::snprintf (status, sizeof (status), "%d + %d", int (live[ParamId::length1]), int (live[ParamId::length2]));
         else
             std::snprintf (status, sizeof (status), "%s", haveMemory ? "NEGATIVE" : "EMPTY");
-        r.right (left + 150, 2, status, muted);
-        r.box (left, 14, 153, 52, film);
+        r.right (left + 150, 3, status, side && diff ? pink : muted);
+        r.box (left, 14, 153, 44, film);
         for (int x = left + 4; x < left + 148; x += 13)
         {
             r.box (x, 16, 5, 2, rule);
-            r.box (x, 62, 5, 2, rule);
+            r.box (x, 55, 5, 2, rule);
         }
         if (!side && !haveMemory)
         {
-            r.text (left + 12, 29, "No saved pattern", muted);
-            r.text (left + 12, 44, "Select SAVE below", muted);
+            r.text (left + 12, 25, "No saved pattern", light);
+            r.text (left + 12, 39, "Select SAVE below", muted);
             continue;
         }
         for (int cell = 0; cell < cellCount; ++cell)
         {
-            const int lane = cell / 8, k = cell % 8, x = left + 8 + 17 * k, y = 21 + 19 * lane;
-            const auto bits = bitsId (lane), cv = cvId (cell);
-            exposure (r, x, y, side ? live[cv] : saved (cv), bit (int (side ? live[bits] : saved (bits)), k), cell,
+            const int lane = cell / 8, k = cell % 8, x = left + 8 + 17 * k, y = 21 + 16 * lane;
+            const auto bits = bitsId (lane);
+            auto at = [&] (int column)
+            {
+                const auto id = cvId (lane * 8 + (column + 8) % 8);
+                return side ? live[id] : saved (id);
+            };
+            exposure (r, x, y, at (k - 1), at (k), at (k + 1), bit (int (side ? live[bits] : saved (bits)), k),
                       side ? positive : negative);
-            if (side && cellChanged (cell)) r.box (x, y + 16, 16, 2, amber);
+            if (side && cellChanged (cell)) r.box (x, y + 13, 16, 2, pink);
         }
     }
 }
 
 void Screen::card (Raster& r) const
 {
-    r.box (5, 1, 310, 65, paper);
-    r.box (5, 1, 2, 65, pencil);
-    for (int y : {8, 23, 38, 53})
+    clipped (r, 5, 1, 310, 63, paper);
+    r.box (10, 4, 296, 12, carbon);
+    r.text (16, 6, "BIT", lime);
+    for (int y : {21, 35, 48, 57})
     {
-        r.box (9, y, 3, 5, ground);
-        r.box (308, y, 3, 5, ground);
+        r.box (8, y, 3, 4, ground);
+        r.box (309, y, 3, 4, ground);
     }
-    r.text (17, 6, "BIT", brick);
     for (int k = 0; k < 8; ++k)
     {
         const int x = 48 + k * 32;
         const char label[] = {char ('1' + k), 0};
-        r.text (x + 9, 6, label, carbon);
+        r.text (x + 9, 6, label, light);
         r.box (x - 2, 17, 1, 44, pencil);
         for (int lane = 0; lane < 2; ++lane)
         {
@@ -311,25 +333,34 @@ void Screen::card (Raster& r) const
             // A bipolar voltage ruler next to the punched hole.
             r.box (x + 15, y + 9, 10, 1, pencil);
             const int bar = int (std::lround (live[cvId (cell)] * 6));
-            r.box (x + 18, y + 9 - std::max (0, bar), 4, std::abs (bar) + 1, enabled ? teal : pencil);
-            if (selection == cell) r.frame (x, y, 28, 19, brick);
-            if (cellChanged (cell)) r.box (x + 23, y + 2, 3, 3, brick);
+            r.box (x + 18, y + 9 - std::max (0, bar), 4, std::abs (bar) + 1, enabled ? blueInk : pencil);
+            if (selection == cell)
+            {
+                r.frame (x, y, 28, 19, berry);
+                r.box (x, y, 7, 2, berry);
+                r.box (x + 21, y + 17, 7, 2, berry);
+            }
+            if (cellChanged (cell)) r.box (x + 23, y + 2, 3, 3, berry);
             for (int s = 0; s < 2; ++s)
             {
                 if (head (s, false) == cell) r.box (x + 2 + s * 12, y + 16, 10, 2, hitInk[flash[s]]);
-                if (head (s, true) == cell) diamond (r, x + 6 + s * 12, y + 1, teal);
+                if (head (s, true) == cell) diamond (r, x + 6 + s * 12, y + 1, blueInk);
             }
         }
     }
-    r.text (19, 24, "A", carbon);
-    r.text (19, 46, "B", carbon);
+    clipped (r, 15, 21, 23, 14, carbon);
+    clipped (r, 15, 42, 23, 14, carbon);
+    r.text (22, 24, "A", lime);
+    r.text (22, 45, "B", ice);
     for (int i = 0; i < int (std::size (actions)); ++i)
     {
         const int x = 5 + 78 * i;
         const bool selected = selection == cellCount + i;
-        r.box (x, 71, 75, 16, selected ? amber : panel);
-        r.text (x + 5, 75, actionLabels[i],
-                selected ? carbon : (actions[i] == ParamId::recall && !haveMemory ? muted : light));
+        const Ink ink = selected ? carbon : (i < 2 ? ice : lime);
+        clipped (r, x, 68, 75, 16, selected ? lime : panel);
+        // Rotation, print, and return marks echo the action under the cursor.
+        r.text (x + 4, 72, i < 2 ? ">" : i == 2 ? "+" : "<", ink);
+        r.text (x + 16, 72, actionLabels[i], selected ? carbon : (i == 3 && !haveMemory ? muted : light));
     }
 }
 
@@ -339,20 +370,32 @@ void Screen::cellValues (Raster& r) const
     for (int side = 0; side < 2; ++side)
     {
         const int x = 5 + 156 * side;
-        r.box (x, 3, 153, 62, side ? paper : panel);
-        const Ink fg = side ? carbon : light, sub = side ? brick : muted;
-        r.text (x + 7, 9, side ? "LIVE" : "SAVED", sub);
+        const Ink fill = side ? lime : panel;
+        const Ink fg = side ? carbon : light, sub = side ? carbon : ice;
+        clipped (r, x, 1, 153, 55, fill);
+        r.text (x + 7, 7, side ? "LIVE" : "SAVED", sub);
         if (!side && !haveMemory)
         {
-            r.text (x + 7, 32, "No saved print", muted);
+            r.text (x + 7, 31, "No saved print", muted);
             continue;
         }
         const bool on = bit (int (side ? live[bits] : saved (bits)), selection % 8);
-        r.right (x + 146, 9, on ? "GATE ON" : "GATE OFF", sub);
+        r.right (x + 146, 7, on ? "GATE ON" : "GATE OFF", sub);
         char text[32];
         voltage (text, side ? live[cv] : saved (cv));
-        large (r, x + 7, 31, text, fg);
-        r.box (x + 7, 54, 139, 1, side ? pencil : rule);
+        large (r, x + 7, 25, text, fg);
+        r.box (x + 7, 48, 139, 1, side ? blueInk : violet);
+        // The little eight-gate print beside the voltage identifies this step even with the gate closed.
+        const int mask = int (side ? live[bits] : saved (bits));
+        for (int j = 0; j < 8; ++j)
+        {
+            const int tx = x + 118 + (j % 4) * 7, ty = 25 + (j / 4) * 8;
+            if (bit (mask, j))
+                r.box (tx, ty, 5, 5, fg);
+            else
+                r.frame (tx, ty, 5, 5, side ? blueInk : violet);
+            if (j == selection % 8) r.box (tx, ty + 6, 5, 1, fg);
+        }
     }
 }
 
@@ -367,16 +410,21 @@ void Screen::cellDetail (Raster& r) const
         std::snprintf (text, sizeof (text), "CHANGE  %+.2f V", 5 * (live[cv] - saved (cv)));
     else
         std::snprintf (text, sizeof (text), "NO BASELINE");
-    r.right (311, 3, text, amber);
+    r.right (311, 3, text, haveMemory && live[cv] != saved (cv) ? pink : lime);
     constexpr int left = 18, width = 284;
     for (int j = 0; j <= 20; ++j)
         r.box (left + j * width / 20, j % 2 ? 23 : 20, 1, j % 2 ? 4 : 10, rule);
     r.box (left, 25, width + 1, 1, muted);
     auto at = [&] (float v) { return left + int (std::lround ((v + 1) * .5f * width)); };
-    if (haveMemory) r.frame (at (saved (cv)) - 3, 17, 7, 7, light);
     const int x = at (live[cv]);
+    if (haveMemory)
+    {
+        const int original = at (saved (cv));
+        r.box (std::min (x, original), 24, std::abs (original - x) + 1, 3, violet);
+        r.frame (original - 3, 16, 7, 7, ice);
+    }
     for (int dy = 0; dy < 5; ++dy)
-        r.box (x - dy, 27 + dy, 2 * dy + 1, 1, amber);
+        r.box (x - dy, 27 + dy, 2 * dy + 1, 1, lime);
     r.text (8, 36, "-5 V", muted);
     r.text (150, 36, "0 V", muted);
     r.right (312, 36, "+5 V", muted);
@@ -388,34 +436,34 @@ void Screen::cellDetail (Raster& r) const
     {
         const int pos = 67 + 19 * j;
         if (bit (int (live[bitsId (lane)]), j))
-            r.box (pos, 56, 14, 8, j < length ? amber : rule);
+            r.box (pos, 56, 14, 8, j < length ? lime : rule);
         else
             r.frame (pos, 56, 14, 8, j < length ? muted : rule);
-        if (j == k) r.box (pos, 67, 14, 2, amber);
+        if (j == k) r.box (pos, 67, 14, 2, lime);
     }
     std::snprintf (text, sizeof (text), "%d/8 STEPS", length);
     r.right (311, 56, text, muted);
-    r.text (9, 76, "PUSH GATE", light);
-    r.text (111, 76, "WHEEL CELL", muted);
-    r.right (311, 76, "- BACK", light);
+    r.text (9, 74, "PUSH GATE", light);
+    r.text (111, 74, "WHEEL CELL", muted);
+    r.right (311, 74, "- BACK", light);
 }
 
 void Screen::list (Raster& r) const
 {
-    const int start = std::max (0, row () - 6);
-    r.text (9, 4, editing ? "TURN TO EDIT" : "PARAMETERS", amber);
+    const int start = std::clamp (row () - 6, 0, std::max (0, rows - 8));
+    r.text (9, 4, editing ? "TURN TO EDIT" : "PARAMETERS", lime);
     r.right (311, 4, editing ? "PUSH TO FINISH" : "- / +  PAGE", muted);
     for (int i = start; i < std::min (rows, start + 8); ++i)
     {
         const auto& p = parameter (fields[i]);
         const bool active = i == row ();
-        const int y = 19 + (i - start) * 17;
-        if (active) r.box (5, y - 2, 310, 16, paper);
-        r.text (10, y + 1, active ? (editing ? "*" : ">") : " ", brick);
+        const int y = 19 + (i - start) * 16;
+        if (active) clipped (r, 5, y - 2, 310, 16, paper);
+        r.text (10, y + 1, active ? (editing ? "*" : ">") : " ", berry);
         r.text (24, y + 1, p.name, active ? carbon : light);
         char text[48];
         shortValue (p.id, live[p.id], text);
-        r.right (310, y + 1, p.kind == Kind::button ? "PUSH" : text, active ? brick : muted);
+        r.right (310, y + 1, p.kind == Kind::button ? "PUSH" : text, active ? berry : muted);
     }
 }
 
@@ -444,23 +492,24 @@ void Screen::footer (Raster& r) const
         if (k) r.box (x - 3, 3, 1, 25, panel);
         char label[20];
         std::snprintf (label, sizeof (label), "K%d", k + 1);
-        r.text (x, 3, label, amber);
+        clipped (r, x, 1, 18, 12, k == 1 ? ice : lime);
+        r.text (x + 2, 3, label, carbon);
         if (bindings[k] == CLAP_INVALID_ID) continue;
         const Param& p = parameter (bindings[k]);
         const char* const home[] = {"CORRUPT A", "CORRUPT B", "CLOCK DIV"};
         const char* const cell[] = {"STEP CV", "LENGTH", "CORRUPT"};
         std::snprintf (label, sizeof (label), "%.11s", group ? p.name : inspector ? cell[k] : home[k]);
-        r.text (x + 19, 3, label, muted);
+        r.text (x + 21, 3, label, light);
         char text[48];
         shortValue (p.id, live[p.id], text);
         text[14] = 0;
         r.text (x, 16, text, light);
         constexpr int width = 95;
         const float norm = (live[p.id] - p.min) / (p.max - p.min);
-        r.box (x, 28, width, 1, rule);
-        r.box (x, 28, int (std::lround (norm * width)), 1, amber);
+        r.box (x, 26, width, 1, rule);
+        r.box (x, 26, int (std::lround (norm * width)), 1, k == 1 ? ice : lime);
         if (pots[k].position >= 0 && !pots[k].engaged)
-            r.frame (x + pots[k].position * (width - 1) / 127 - 1, 26, 3, 4, light);
+            r.frame (x + pots[k].position * (width - 1) / 127 - 1, 24, 3, 4, light);
     }
 }
 

@@ -13,8 +13,8 @@ start again from the song's place when it starts or jumps.
 ## Contact Sheet on the MPC Sample
 
 In hdslaveOS, open Psychic in Melodee's Edit or Stage plug-in page. Each frame in the two film strips is a step.
-The upper row is sequencer A, the lower row B. An open gate makes a brighter exposure, and the trace height shows
-the step voltage. Select **Save** to print the pattern on the left. Amber underlines on the live print and red dots
+The upper row is sequencer A, the lower row B. An open gate lights up the ribbon, and the height of its centre shows
+the step voltage. Select **Save** to print the pattern on the left. Pink underlines on the live print and magenta dots
 on the punch card mark cells whose gate or voltage differs. **Recall** restores the saved sequencer settings.
 
 ![Psychic's Contact Sheet and cell editor in Melodee](docs/contact-sheet.png)

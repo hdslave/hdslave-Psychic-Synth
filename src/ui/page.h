@@ -69,7 +69,7 @@ public:
     {
         static_assert (W * H <= capacity);
         Raster r { scratch, W, H };
-        std::fill_n (scratch, W * H, 0xff24191eu);
+        std::fill_n (scratch, W * H, 0xff0c0b1bu);
         draw (r);
         bool touched = false;
         for (int j = 0; j < H; ++j)

@@ -1554,8 +1554,8 @@ void testScreen()
     a.setup ({});
     CHECK (a.value ("Bits 1") == 108 && key (MELODEE_SCREEN_NUDGE,-1));
     CHECK (paint());
-    constexpr auto marked = 0xff943e31u;
-    constexpr int markX = 48+23, markY = 95+19+2;
+    constexpr auto marked = 0xffa20d65u;
+    constexpr int markX = 48+23, markY = 102+19+2;
     CHECK (pixel (markX,markY) == marked);
     const auto withChanges = saveState (a);
     CHECK (key (MELODEE_SCREEN_WHEEL,-1) && key (MELODEE_SCREEN_PUSH)); // RECALL
@@ -1583,10 +1583,10 @@ void testScreen()
     CHECK (paint() && paints > before);
     canvas.now_ms += 250;
     paint();
-    constexpr auto restingHead = 0xff352c30u;
-    CHECK (pixel (82,130) == restingHead && pixel (62,151) == restingHead);
-    constexpr auto writeHead = 0xff37706au;
-    CHECK (pixel (118,115) == writeHead && pixel (66,136) == writeHead);
+    constexpr auto restingHead = 0xff211a35u;
+    CHECK (pixel (82,137) == restingHead && pixel (62,158) == restingHead);
+    constexpr auto writeHead = 0xff285f83u;
+    CHECK (pixel (118,122) == writeHead && pixel (66,143) == writeHead);
     before = paints;
     CHECK (!paint() && paints == before);
     // In a chain both playheads can land on B02. Their indicators have separate slots.
@@ -1595,7 +1595,7 @@ void testScreen()
     CHECK (paint());
     canvas.now_ms += 250;
     paint();
-    CHECK (pixel (82,151) == restingHead && pixel (94,151) == restingHead);
+    CHECK (pixel (82,158) == restingHead && pixel (94,158) == restingHead);
 
     CHECK (a.loadPreset ("default"));
     a.setup ({});
