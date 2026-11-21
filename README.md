@@ -68,7 +68,9 @@ Each sequencer has 8 **bits**. A bit is on or off, and each holds a CV between �
   play from a stop, to bring the heads back together.
 - **EG Trig Mix** sets how hard each sequencer's triggers hit the envelopes. Fully left, SEQ 1's triggers fire at full
   and SEQ 2's do nothing. Fully right, the reverse. In the middle, each fires at half, and both together at full, so
-  where the two patterns meet you get an accent.
+  where the two patterns meet you get an accent. A softer trigger never cuts a louder one: while a louder hit is
+  still rising (a Trigger on a step's frame, two notes in one block), the softer one leaves its peak, and over a
+  tail still falling it does not cut the tail.
 - **Bits 1** and **Bits 2** show the patterns as the panel's LEDs would, step 1 first (`X.XX.XX.`). Turn them, or
   type a pattern, to set one. **Seq 1 CV 1–8** and **Seq 2 CV 1–8** show the bits' CVs and let you set them. When Bit
   Flip, Bit Shift, Corrupt or Recall changes these, the host is told, so a project saves the sequences as they are.
@@ -168,8 +170,9 @@ The test build renders each preset as `build/demo-<key>.wav` to listen to.
   distance from it: what Reset, Advance and Bit Shift 2 did holds through the loop.
 - Melodee tells a plug-in where the song is only at its own blocks: a loop whose end falls inside a block is told
   at the next one. The loop's first step has already played on its frame by then (the loop's end is its start), so
-  it is not played again; the sequences just line up with it. If that step was silent where the count had run on to
-  (a ring that does not divide the loop) and the loop's first step is on, it sounds at the start of the next block.
+  it is not played again; the sequences just line up with it. If a sequence's bit was off where the count had run on
+  to (a ring that does not divide the loop) and is on at the loop's first step, that step sounds at the start of the
+  next block, at its full level with every sequence on there, as loud as on the first pass.
 - A host whose count drifts from Psychic's (its tempo moving inside a block) is followed without a jump: every step
   plays once. Tempos past 1000 BPM are taken as 1000.
 - Settings the host sends on Play's own frame are in place for Play. Buttons sent then (a Reset, say) act after Play
@@ -244,10 +247,14 @@ The tests load the plug-in through the CLAP API and check:
   dialect; flush with values and buttons, active and not;
 - a state loaded while a block plays, in the block where the engine changes a value or Save is pressed (the loaded
   values and buffer stand, even a value equal to the one before the change);
-- a two-bar loop as Melodee plays it, its end inside a block: every step once, on its frame; a ring of 5 in it;
+- a two-bar loop as Melodee plays it, its end inside a block: every step once, on its frame; a ring of 5 in it; a
+  downbeat one sequence sounds a block late, as loud as on the first pass and as a host telling of the wrap on its
+  own frame plays it, apart and chained;
 - odd text: empty, `nan`, padded choice names, numbers in place of names, a unit's edge;
 - the same output and the same values heard back whatever the block size (1, 37, 128, 4096 frames), with the dice
   rolling;
+- a softer trigger while a louder one is rising (two notes on one frame, or half a millisecond apart; a Trigger on a
+  step's frame) leaving the louder peak, to the bit;
 - the bits as hits, EG Trig Mix (each end, the middle, and both at once twice as loud), polymeter Lengths, Bit Shift,
   Bit Flip at the write head (and its new CV heard by the host), Chain Seq and its ring shift, Reset and Advance;
 - Corrupt: fully left it loops at the same pitches, at 45 % it changes notes but not the rhythm, and at full it flips

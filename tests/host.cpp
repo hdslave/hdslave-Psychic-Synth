@@ -1,9 +1,9 @@
 // Loads Psychic.clap as a host does and checks it: description and ports, parameters, state (with the buffer), presets,
 // the sequencers against the host's transport (timing to the frame, stop, restart, jumps, a loop that wraps inside a
 // block), the same output whatever the block size, the buttons, the bits and their CVs (Bit Flip, Bit Shift, Length,
-// Chain Seq, Reset, Advance, Corrupt, Save and Recall, all heard back by the host), EG Trig Mix, the quantizer and
-// MIDI transposing, Clock 2, the routing (Order, Blend, Fold, Drone, Noise Tone) and bounded output at extreme
-// settings. Writes demo renders as WAV files into the output folder.
+// Chain Seq, Reset, Advance, Corrupt, Save and Recall, all heard back by the host), EG Trig Mix, a softer trigger in a
+// louder one's attack, the quantizer and MIDI transposing, Clock 2, the routing (Order, Blend, Fold, Drone, Noise
+// Tone) and bounded output at extreme settings. Writes demo renders as WAV files into the output folder.
 //   host Psychic.clap OUT_FOLDER
 #include "wav.h"
 #include "../src/melodee_screen.h"
@@ -804,6 +804,52 @@ void testBitsAndTrigMix()
     CHECK (pk.size() == 6 && std::fabs (pk[4] / pk[3] - 2.0f) < 0.02f && std::fabs (pk[5] / pk[3] - 1.0f) < 0.01f);
 }
 
+// A softer trigger while a louder one is still rising leaves the louder peak: the hit sounds to the bit as the louder
+// trigger alone.
+void testSofterTriggerInAttack()
+{
+    std::vector<float> l, r, alone;
+    auto patch = [] (Instance& a, int bits1, int bits2) {
+        auto p = clickPatch (a, bits1);
+        p.push_back ({ "Bits 2", bits2 });
+        p.push_back ({ "EG Trig Mix", 0.5 });
+        p.push_back ({ "VCO Freq", 0.75 });
+        p.push_back ({ "Volume", 0.35 });
+        p.push_back ({ "EG2 Decay", 0.3 });
+        p.push_back ({ "Length 1", 4 });
+        p.push_back ({ "Length 2", 4 });
+        return p;
+    };
+    // Stopped, notes at velocity 1 then 0.4: on one frame (a host that gives a block's notes all on its first frame)
+    // and half a millisecond apart (24 frames: the first one's attack half done).
+    auto notes = [&] (std::vector<std::pair<uint64_t, double>> list, std::vector<float>& out) {
+        Instance a;
+        a.setup (patch (a, 0, 0));
+        a.render (24000, 128, out, r, stopped, [&] (uint64_t at, uint32_t n, Events& e) {
+            for (auto& [when, velocity] : list)
+                if (when >= at && when < at + n)
+                    e.note ((uint32_t) (when - at), CLAP_EVENT_NOTE_ON, 60, velocity);
+        });
+    };
+    notes ({ { 1280, 1.0 } }, alone);
+    CHECK ((onsets (alone) == std::vector<long> { 1280 }));
+    notes ({ { 1280, 1.0 }, { 1280, 0.4 } }, l);
+    CHECK (l == alone);
+    notes ({ { 1280, 1.0 }, { 1304, 0.4 } }, l);
+    CHECK (l == alone);
+    // A Trigger pressed on a step's frame (the frame's events come before its clock): the step, SEQ 1 alone at half,
+    // strikes while the Trigger's full charge is rising. The hit is full, as where both sequences meet.
+    auto steps = [&] (int bits2, bool trigger, std::vector<float>& out) {
+        Instance a;
+        a.setup (patch (a, 1 + 2, bits2));
+        a.render (36000, 128, out, r, from0, trigger ? a.pressAt ({ { 12000, "Trigger" } }) : nullptr);
+    };
+    steps (2, false, alone); // step 2: both sequences, full
+    CHECK ((onsets (alone) == std::vector<long> { 0, 12000 }));
+    steps (0, true, l);      // step 2: SEQ 1 alone and the Trigger
+    CHECK (l == alone);
+}
+
 void testLengthShiftFlip()
 {
     std::vector<float> l, r;
@@ -1360,6 +1406,46 @@ void testMidBlockLoop()
         CHECK (std::find (hits.begin(), hits.end(), (long) loopFrames + 120) != hits.end());
         CHECK (std::find (hits.begin(), hits.end(), (long) loopFrames) == hits.end());
     }
+    // Both sequences into the EGs (EG Trig Mix in the middle), at 1/4. The loop's first step is both (full); the step
+    // the count ran on to is SEQ 2's alone (half): it struck on the loop's last frame, and SEQ 1's bit sounds a block
+    // late. The downbeat is still full, as on the first pass and as a host that tells of the wrap on its own frame
+    // (8-frame blocks) plays it. Apart: SEQ 1 a ring of 5, SEQ 2 of 4, bit 1 on in each. Chained: one ring of 5, its
+    // bits 1, 2 and 5 on, SEQ 2's head a bit ahead (Bit Shift 2).
+    for (bool chained : { false, true })
+    {
+        auto downbeats = [&] (uint32_t block, const std::function<Transport (uint64_t)>& transport) {
+            Instance a;
+            auto p = clickPatch (a, chained ? 1 + 2 : 1);
+            p.push_back ({ "Bits 2", chained ? 2 : 1 });
+            p.push_back ({ "Length 1", chained ? 3 : 5 });
+            p.push_back ({ "Length 2", chained ? 2 : 4 });
+            p.push_back ({ "Chain Seq", chained ? 1.0 : 0.0 });
+            p.push_back ({ "EG Trig Mix", 0.5 });
+            p.push_back ({ "Clock Div", a.valueOf ("Clock Div", "1/4") });
+            p.push_back ({ "VCO Freq", 0.75 });
+            p.push_back ({ "Volume", 0.35 });
+            p.push_back ({ "EG2 Decay", 0.45 }); // 203 ms: long against the block, silent before the next step
+            a.setup (p);
+            a.render ((uint32_t) (3 * loopFrames), block, l, r, transport, chained ? a.pressAt ({ { 6000, "Bit Shift 2" } }) : nullptr);
+            const auto hits = onsets (l);
+            const auto e = energies (l, hits);
+            std::vector<float> out;
+            for (size_t k = 0; k < hits.size(); ++k)
+                if (hits[k] % (long) loopFrames <= 120)
+                    out.push_back (e[k]);
+            printHits ("loop downbeats, onsets", hits);
+            if (debug()) for (float x : out) std::printf ("debug loop downbeat energy %.4f\n", x);
+            return out;
+        };
+        const auto late = downbeats (128, melodee);
+        const auto onTime = downbeats (8, [] (uint64_t at) { return playingFrom (0.0, bpm, 48000.0, at % (uint64_t) loopFrames); });
+        CHECK (late.size() == 3 && onTime.size() == 3);
+        for (size_t k = 0; k < std::min (late.size(), onTime.size()); ++k)
+        {
+            CHECK (std::fabs (onTime[k] / onTime[0] - 1.0f) < 0.005f);
+            CHECK (std::fabs (late[k] / onTime[k] - 1.0f) < 0.03f);
+        }
+    }
 }
 
 void testHostEdges()
@@ -1737,6 +1823,7 @@ int main (int argc, char** argv)
     testStopRestartJump();
     testBlockSizes();
     testBitsAndTrigMix();
+    testSofterTriggerInAttack();
     testLengthShiftFlip();
     testChainResetAdvance();
     testCorrupt();

@@ -70,7 +70,8 @@ inline float tanPade (float x)
 // --- Envelope ---------------------------------------------------------------------------------------------------
 // The panel's EGs are decay-only: a trigger charges the envelope from wherever it is toward the trigger's level (its
 // peak) in about a millisecond, then it decays exponentially. A softer trigger than where a tail still is does not
-// cut it: the tail goes on falling.
+// cut it: the tail goes on falling. Nor does a softer trigger cut a louder one's attack: the charge goes on to the
+// louder peak.
 struct Envelope
 {
     float value = 0.0f;
@@ -81,8 +82,8 @@ struct Envelope
 
     void trigger (float level)
     {
-        peak = level;
-        attacking = level > value;
+        peak = attacking ? std::max (peak, level) : level;
+        attacking = peak > value;
     }
     bool idle() const { return ! attacking && value == 0.0f; }
     float next()
@@ -706,23 +707,26 @@ private:
         for (auto& l : lanes)
             l.aligned = false, l.offset = fresh ? 0 : l.offset;
         // The sequences on a clock that stood for b go to where b puts them, as if b had played there: the CV is b's
-        // bit's; and if the step played then was silent and b's bit is on, b sounds now (a block late at most).
-        bool hit[2] = {};
+        // bit's; and if the step played then was silent and b's bit is on, b sounds now (a block late at most). It
+        // sounds as b does, with every sequence whose bit there is on: one that already struck on that clock (its
+        // old bit on too) still has its share in b's level, or b would come in softer than it plays elsewhere.
+        bool on[2] = {}, newlyOn = false;
         for (int s = 0; s < 2; ++s)
         {
             const int c = s == 1 && ownClock2() ? 1 : 0;
             if (! stood[c])
                 continue;
-            const bool on = moveOn (s, true, b[c]);
+            on[s] = moveOn (s, true, b[c]);
             lanes[s].aligned = true;
-            hit[s] = on && ! lanes[s].hit;
-            lanes[s].hit |= on;
+            newlyOn |= on[s] && ! lanes[s].hit;
+            lanes[s].hit |= on[s];
         }
         if (stood[0] || stood[1])
         {
             stepped();
             const float mix = knob[ParamId::egTrigMix];
-            strikeLevel ((hit[0] ? 1.0f - mix : 0.0f) + (hit[1] ? mix : 0.0f));
+            if (newlyOn)
+                strikeLevel ((on[0] ? 1.0f - mix : 0.0f) + (on[1] ? mix : 0.0f));
         }
     }
 
