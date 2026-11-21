@@ -386,6 +386,20 @@ public:
             buffer[i] = values[i];
     }
 
+    // Physical cell on the two sequencer lanes (0..7, 8..15). A reset head has no played cell.
+    int screenCell (int s, bool write) const
+    {
+        const int place = write ? writePlace (s) : lanes[s].play;
+        if (place < 0) return 16;
+        int lane, bit;
+        cellOf (s, place % ringLength (s), lane, bit);
+        return lane * 8 + bit;
+    }
+    int64_t screenHitFrame (int s) const
+    {
+        return running() && lanes[s].hit ? clocks[s == 1 && ownClock2() ? 1 : 0].at : -1;
+    }
+
     // Where the sequence's own count is: for a host that gives no song position (0 when it last stopped).
     double ownPosition() const { return playing ? position : 0.0; }
 

@@ -10,6 +10,28 @@ moves come as controls of their own: a second clock, the Mod VCO into Fold and i
 Its sequencers are clocked by the host: steps fall on the host's beat grid while it plays, stop when it stops, and
 start again from the song's place when it starts or jumps.
 
+## Contact Sheet on the MPC Sample
+
+In hdslaveOS, open Psychic in Melodee's Edit or Stage plug-in page. Each frame in the two film strips is a step.
+The upper row is sequencer A, the lower row B. An open gate makes a brighter exposure, and the trace height shows
+the step voltage. Select **Save** to print the pattern on the left. Amber underlines on the live print and red dots
+on the punch card mark cells whose gate or voltage differs. **Recall** restores the saved sequencer settings.
+
+![Psychic's Contact Sheet and cell editor in Melodee](docs/contact-sheet.png)
+
+| View | Wheel and push | K1 | K2 | K3 |
+|---|---|---|---|---|
+| Contact Sheet | Turn to a cell and push to open it, or select Shift A, Shift B, Save or Recall and push | Corrupt A | Corrupt B | Clock Div |
+| Cell editor | Turn through the 16 cells. Push to toggle the gate. Minus returns to the sheet | Step voltage | Lane length | Lane corruption |
+| Parameter pages | Turn to a parameter. Push to edit its value or fire a button | Selected parameter | Next parameter | Following parameter |
+
+On the card, a filled punch is an open gate. The small bar beside it shows voltage above or below zero. Diamonds
+mark the write heads, and bars below the cells mark the play heads. Cells beyond the lane length are dimmed.
+**Plus** opens the parameter pages. Use **Minus/Plus** to move between groups and hold **Shift** for the control guide.
+
+The page uses the hdslaveOS screen extension for Melodee by Kerem Kiliç (Ellic Studio).
+The bitmap typeface is Departure Mono. [Font license](licenses/OFL-departure-mono.txt)
+
 ## Signal flow
 
 ```
@@ -58,7 +80,7 @@ way, every time.
 
 ## Controls
 
-The panel's names, in the order Melodee's Edit page lists them (three to a page).
+The public CLAP parameter names and their panel equivalents are listed below.
 
 | Psychic | Labyrinth panel | Range |
 |---|---|---|
@@ -203,6 +225,8 @@ tools/bench.sh      # instruction counts for worst, typical, turning and stopped
 ```
 
 The tests load the plug-in through the CLAP API and check:
+
+- screen painting, playhead positions, hardware bindings, cell edits, snapshot recall and expired button presses;
 
 - the description, ports and every parameter's range, text and default (the patterns' `X.XX....`, QTZ, LP/BP, the
   two-way knobs);

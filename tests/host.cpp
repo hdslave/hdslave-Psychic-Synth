@@ -6,11 +6,14 @@
 // settings. Writes demo renders as WAV files into the output folder.
 //   host Psychic.clap OUT_FOLDER
 #include "wav.h"
+#include "../src/melodee_screen.h"
 
 #include <clap/clap.h>
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
@@ -31,12 +34,15 @@ const clap_plugin_entry* entry = nullptr;
 const clap_plugin_factory* factory = nullptr;
 
 // The host side: log, and the two a preset load tells (counted); the plug-in must cope without the rest.
+int paints = 0, wakes = 0, flushes = 0;
 int rescans = 0, presetsLoaded = 0, presetErrors = 0;
 const void* hostExtension (const clap_host*, const char* id)
 {
+    static const clap_host_melodee_screen screen { [] (const clap_host*) { ++paints; } };
+    if (std::strcmp (id, CLAP_EXT_MELODEE_SCREEN_HOST) == 0) return &screen;
     static const clap_host_log log { [] (const clap_host*, clap_log_severity s, const char* m) { std::printf ("  [plug-in log %d] %s\n", (int) s, m); } };
     static const clap_host_params params { [] (const clap_host*, clap_param_rescan_flags f) { rescans += (f & CLAP_PARAM_RESCAN_VALUES) != 0; },
-                                           [] (const clap_host*, clap_id, clap_param_clear_flags) {}, [] (const clap_host*) {} };
+                                           [] (const clap_host*, clap_id, clap_param_clear_flags) {}, [] (const clap_host*) { ++flushes; } };
     static const clap_host_preset_load presetLoad {
         [] (const clap_host*, uint32_t, const char*, const char*, int32_t, const char*) { ++presetErrors; },
         [] (const clap_host*, uint32_t, const char*, const char*) { ++presetsLoaded; },
@@ -49,7 +55,7 @@ const void* hostExtension (const clap_host*, const char* id)
 
 clap_host host {
     CLAP_VERSION, nullptr, "Psychic test host", "tests", "", "1",
-    hostExtension, [] (const clap_host*) {}, [] (const clap_host*) {}, [] (const clap_host*) {},
+    hostExtension, [] (const clap_host*) {}, [] (const clap_host*) { ++wakes; }, [] (const clap_host*) {},
 };
 
 // Input events for one process call, in time order.
@@ -1498,6 +1504,139 @@ void testHostEdges()
     }
 }
 
+void testScreen()
+{
+    Instance a;
+    const auto* screen = static_cast<const clap_plugin_melodee_screen*> (a.plugin->get_extension (a.plugin, CLAP_EXT_MELODEE_SCREEN));
+    CHECK (screen);
+    if (!screen) return;
+    constexpr int stride = 327;
+    constexpr uint32_t guard = 0x13579bdf;
+    std::vector<uint32_t> pixels (stride * 218, guard);
+    melodee_screen_canvas_t canvas {};
+    canvas.width = 320; canvas.height = 218; canvas.stride = stride; canvas.pixels = pixels.data(); canvas.now_ms = 1000;
+    for (auto& k : canvas.knobs) k = {-1, true};
+    auto paint = [&] (bool whole = false) { canvas.whole = whole; return screen->paint (a.plugin, &canvas); };
+    auto key = [&] (uint32_t kind, int v = 1) {
+        const melodee_screen_input_t input {kind, v, false};
+        return screen->input (a.plugin, &input);
+    };
+    auto knobs = [&] { std::vector<clap_id> ids (3); screen->knobs (a.plugin, ids.data()); return ids; };
+    auto pixel = [&] (int x, int y) { return pixels[y*stride+x]; };
+    CHECK (paint (true) && !paint());
+    for (int y = 0; y < 218; ++y)
+    {
+        CHECK (pixel (0,y) != guard && pixel (319,y) != guard);
+        CHECK (pixel (320,y) == guard && pixel (326,y) == guard);
+    }
+    canvas.stride = 319;
+    CHECK (!paint (true));
+    canvas.stride = stride;
+    CHECK ((knobs() == std::vector<clap_id> {a.id ("Corrupt 1"),a.id ("Corrupt 2"),a.id ("Clock Div")}));
+    const auto emptyState = saveState (a);
+    CHECK (key (MELODEE_SCREEN_PUSH));
+    CHECK ((knobs() == std::vector<clap_id> {a.id ("Seq 1 CV 1"),a.id ("Length 1"),a.id ("Corrupt 1")}));
+    int rescan = rescans, wake = wakes, flush = flushes;
+    CHECK (key (MELODEE_SCREEN_PUSH));
+    CHECK (a.value ("Bits 1") == 108 && rescans > rescan && flushes > flush && wakes > wake);
+    OutEvents told;
+    a.params->flush (a.plugin,nullptr,&told.out);
+    CHECK (told.of (a.id ("Bits 1")) == std::vector<double> {108});
+    CHECK (key (MELODEE_SCREEN_WHEEL,8));
+    CHECK ((knobs() == std::vector<clap_id> {a.id ("Seq 2 CV 1"),a.id ("Length 2"),a.id ("Corrupt 2")}));
+    CHECK (key (MELODEE_SCREEN_WHEEL,-8) && key (MELODEE_SCREEN_NUDGE,-1));
+
+    // Save, then edit before the next audio block. Even a flush in between must preserve that order.
+    CHECK (a.loadPreset ("default"));
+    CHECK (key (MELODEE_SCREEN_WHEEL,-2) && key (MELODEE_SCREEN_PUSH)); // SAVE
+    CHECK (key (MELODEE_SCREEN_WHEEL,2) && key (MELODEE_SCREEN_PUSH) && key (MELODEE_SCREEN_PUSH));
+    a.params->flush (a.plugin,nullptr,&told.out);
+    a.setup ({});
+    CHECK (a.value ("Bits 1") == 108 && key (MELODEE_SCREEN_NUDGE,-1));
+    CHECK (paint());
+    constexpr auto marked = 0xff943e31u;
+    constexpr int markX = 48+23, markY = 95+19+2;
+    CHECK (pixel (markX,markY) == marked);
+    const auto withChanges = saveState (a);
+    CHECK (key (MELODEE_SCREEN_WHEEL,-1) && key (MELODEE_SCREEN_PUSH)); // RECALL
+    a.setup ({});
+    CHECK (a.value ("Bits 1") == 109 && paint() && pixel (markX,markY) != marked);
+    CHECK (loadState (a,withChanges) && paint() && pixel (markX,markY) == marked);
+    CHECK (loadState (a,emptyState) && paint() && pixel (markX,markY) != marked);
+
+    // A voltage-only edit on a silent gate also marks the contact print.
+    CHECK (key (MELODEE_SCREEN_WHEEL,-1) && key (MELODEE_SCREEN_PUSH)); // SAVE
+    a.setup ({});
+    a.setup ({{"Seq 1 CV 2",0.75}});
+    CHECK (paint() && pixel (markX+32, markY) == marked && pixel (markX,markY) != marked);
+    CHECK (key (MELODEE_SCREEN_WHEEL,1) && key (MELODEE_SCREEN_PUSH));
+    a.setup ({});
+    CHECK (paint() && pixel (markX+32,markY) != marked);
+
+    int before = paints;
+    a.setup ({{"Clock 2",2},{"Write Head 1",1}});
+    CHECK (paints > before && paint());
+    // Separate clocks put A on its second cell while B still occupies its first.
+    std::vector<float> l,r;
+    a.render (12001,128,l,r,from0);
+    before = paints;
+    CHECK (paint() && paints > before);
+    canvas.now_ms += 250;
+    paint();
+    constexpr auto restingHead = 0xff352c30u;
+    CHECK (pixel (82,130) == restingHead && pixel (62,151) == restingHead);
+    constexpr auto writeHead = 0xff37706au;
+    CHECK (pixel (118,115) == writeHead && pixel (66,136) == writeHead);
+    before = paints;
+    CHECK (!paint() && paints == before);
+    // In a chain both playheads can land on B02. Their indicators have separate slots.
+    a.setup ({{"Length 1",1},{"Length 2",3},{"Chain Seq",1},{"Clock 2",0}});
+    a.render (1,1,l,r,[] (uint64_t) { return Transport {true,120,1}; });
+    CHECK (paint());
+    canvas.now_ms += 250;
+    paint();
+    CHECK (pixel (82,151) == restingHead && pixel (94,151) == restingHead);
+
+    CHECK (a.loadPreset ("default"));
+    a.setup ({});
+    CHECK (key (MELODEE_SCREEN_NUDGE) && key (MELODEE_SCREEN_WHEEL,3));
+    CHECK (knobs()[0] == CLAP_INVALID_ID);
+    // Trigger asks the host to wake up. Its timestamp survives later presses.
+    wake = wakes;
+    CHECK (key (MELODEE_SCREEN_PUSH) && wakes > wake);
+    std::this_thread::sleep_for (std::chrono::milliseconds (520));
+    CHECK (key (MELODEE_SCREEN_WHEEL,1) && key (MELODEE_SCREEN_PUSH)); // fresh Advance
+    a.plugin->reset (a.plugin);
+    auto stopped = [] (uint64_t) { return Transport {false,120,0}; };
+    a.render (1024,128,l,r,stopped);
+    CHECK (std::all_of (l.begin(),l.end(),[] (float v){return v==0;}));
+    CHECK (key (MELODEE_SCREEN_WHEEL,-1) && key (MELODEE_SCREEN_PUSH));
+    a.render (1024,128,l,r,stopped);
+    CHECK (std::any_of (l.begin(),l.end(),[] (float v){return std::fabs(v)>.005f;}));
+
+    // Every public non-button parameter remains reachable with the hardware encoders.
+    std::vector<clap_id> reached;
+    for (int g=0; g<13; ++g)
+    {
+        key (MELODEE_SCREEN_WHEEL,-100);
+        for (int row=0; row<16; ++row)
+        {
+            const auto ids = knobs();
+            reached.insert (reached.end(),ids.begin(),ids.end());
+            key (MELODEE_SCREEN_WHEEL,1);
+        }
+        if (g<12) CHECK (key (MELODEE_SCREEN_NUDGE));
+    }
+    for (uint32_t n=0; n<a.params->count (a.plugin); ++n)
+    {
+        clap_param_info info {};
+        a.params->get_info (a.plugin,n,&info);
+        if (a.text (info.name,1)!="Pressed")
+            CHECK (std::find (reached.begin(),reached.end(),info.id)!=reached.end());
+    }
+    CHECK (!key (MELODEE_SCREEN_NUDGE));
+}
+
 void demos (const std::string& folder)
 {
     // The factory presets, 8 s each at 120 BPM: each loaded by its key, written out to listen to.
@@ -1560,6 +1699,7 @@ int main (int argc, char** argv)
     testOffsetsThroughLoops();
     testMidBlockLoop();
     testHostEdges();
+    testScreen();
     testExtremes();
     demos (argv[2]);
     entry->deinit();

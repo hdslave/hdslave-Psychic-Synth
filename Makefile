@@ -15,8 +15,8 @@ CXXFLAGS := -std=c++17 $(OPT) $(WARN) -fno-exceptions -fno-rtti -fvisibility=hid
 # leaves out the symbol table (the code is the same; the exported clap_entry stays).
 LDFLAGS := -shared -s -static-libgcc -static-libstdc++ -Wl,--gc-sections -Wl,-z,now -Wl,-O1 -Wl,--version-script=src/exports.map
 
-SOURCES := src/psychic.cpp
-HEADERS := $(wildcard src/*.h)
+SOURCES := src/psychic.cpp src/screen.cpp
+HEADERS := $(wildcard src/*.h src/ui/*.h)
 
 .PHONY: all test bench clean fingerprint-update
 all: $(OUT)/Psychic.clap
@@ -25,7 +25,7 @@ $(OUT)/Psychic.clap: $(SOURCES) $(HEADERS) src/exports.map Makefile
 	@mkdir -p $(OUT)
 	$(CXX) $(CXXFLAGS) $(SOURCES) $(LDFLAGS) -o $@
 
-$(OUT)/host: tests/host.cpp tests/wav.h Makefile
+$(OUT)/host: tests/host.cpp tests/wav.h src/melodee_screen.h Makefile
 	@mkdir -p $(OUT)
 	$(CXX) -std=c++17 -O2 $(WARN) -Ithird_party/clap/include tests/host.cpp -ldl -o $@
 
@@ -43,7 +43,7 @@ fingerprint-update: $(OUT)/Psychic.clap $(OUT)/fingerprint
 
 $(OUT)/bench: tests/bench.cpp $(SOURCES) $(HEADERS) Makefile
 	@mkdir -p $(OUT)
-	$(CXX) -std=c++17 $(OPT) $(WARN) -g -Ithird_party/clap/include -Isrc tests/bench.cpp -o $@
+	$(CXX) -std=c++17 $(OPT) $(WARN) -g -Ithird_party/clap/include -Isrc tests/bench.cpp src/screen.cpp -o $@
 
 bench: $(OUT)/bench
 

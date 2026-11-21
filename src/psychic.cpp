@@ -4,11 +4,13 @@
 #include "engine.h"
 #include "params.h"
 #include "presets.h"
+#include "screen.h"
 
 #include <clap/clap.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -47,6 +49,24 @@ struct Plugin
     // thread's loads: a load that lands while a block plays wins over what the engine changed in that block.
     std::atomic<bool> exchange { false };
     std::atomic<uint32_t> loads { 0 };
+    const clap_host_melodee_screen* hostScreen = nullptr;
+    const clap_host_params* hostParams = nullptr;
+    std::atomic<uint32_t> bufferRevision { 0 };
+    uint32_t paintedRevision = 0;
+    ScreenFeed feed;
+    Screen screen { values, feed };
+    int64_t lastHit[2] { -1, -1 };
+    bool audioValuesMoved = false;
+
+    // Preserve the order of Save, Recall and individual edits even if several arrive in one block.
+    // The exchange protects this queue. The audio side never waits on the main thread.
+    struct Command { Screen::Edit edit; uint64_t time; };
+    static constexpr unsigned pageCapacity = 128;
+    Command commands[pageCapacity] {};
+    unsigned written = 0, taken = 0;
+    struct PageValue { unsigned queued = 0; float tellValue = 0; bool tell = false; };
+    PageValue edits[paramCount] {};
+    std::atomic<bool> pageWaiting { false };
     Engine engine;
     bool active = false;
 };
@@ -64,6 +84,43 @@ bool tryLockAudio (Plugin& p)
     return p.exchange.compare_exchange_strong (free, true, std::memory_order_acquire);
 }
 void unlock (Plugin& p) { p.exchange.store (false, std::memory_order_release); }
+
+void requestPaint (Plugin& p)
+{
+    if (p.hostScreen && p.hostScreen->request_paint) p.hostScreen->request_paint (p.host);
+}
+
+uint64_t steadyMs()
+{
+    return (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Publish clock positions and actual hits once per audio block. The page never reads the engine.
+void publishScreen (Plugin& p)
+{
+    if (!p.hostScreen) return;
+    uint32_t heads = 0;
+    bool moved = p.audioValuesMoved;
+    p.audioValuesMoved = false;
+    for (int s = 0; s < 2; ++s)
+    {
+        heads |= (uint32_t) p.engine.screenCell (s,false) << (s*10);
+        heads |= (uint32_t) p.engine.screenCell (s,true) << (s*10+5);
+        const auto hit = p.engine.screenHitFrame (s);
+        if (hit >= 0 && hit != p.lastHit[s])
+        {
+            p.feed.hits[s].fetch_add (1, std::memory_order_release);
+            moved = true;
+        }
+        p.lastHit[s] = hit;
+    }
+    if (heads != p.feed.heads.load (std::memory_order_relaxed))
+    {
+        p.feed.heads.store (heads, std::memory_order_release);
+        moved = true;
+    }
+    if (moved) requestPaint (p);
+}
 
 // Parameters --------------------------------------------------------------------------------------------------
 
@@ -91,7 +148,8 @@ bool paramsValue (const clap_plugin* plugin, clap_id id, double* value)
     const int index = paramIndex (id);
     if (index < 0)
         return false;
-    *value = of (plugin).values[index].load (std::memory_order_relaxed);
+    const auto& p = of (plugin);
+    *value = p.feed.value (p.values, index);
     return true;
 }
 
@@ -118,16 +176,16 @@ bool paramsFromText (const clap_plugin*, clap_id id, const char* text, double* v
 
 // A value the plug-in set itself (a button's release, the engine's own change): the host hears it, and does not
 // record it as automation (which would then play the dice back over the sequence).
-void pushValue (const clap_output_events* out, uint32_t time, clap_id id, double value)
+bool pushValue (const clap_output_events* out, uint32_t time, clap_id id, double value, uint32_t flags = CLAP_EVENT_DONT_RECORD)
 {
     if (out == nullptr)
-        return;
+        return false;
     clap_event_param_value back {};
-    back.header = { sizeof (back), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, CLAP_EVENT_DONT_RECORD };
+    back.header = { sizeof (back), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, flags };
     back.param_id = id;
     back.note_id = back.port_index = back.channel = back.key = -1;
     back.value = value;
-    out->try_push (out, &back.header);
+    return out->try_push (out, &back.header);
 }
 
 // One event: parameter values go to the engine at once; notes transpose (and, stopped, trigger) it. What it sends
@@ -157,6 +215,7 @@ void handle (Plugin& p, const clap_event_header* e, const clap_output_events* ou
                 p.values[index].store (0.0f, std::memory_order_relaxed);
                 break;
             }
+            p.audioValuesMoved = true;
             p.values[index].store (value, std::memory_order_relaxed);
             p.engine.set (info.id, value);
             break;
@@ -179,6 +238,52 @@ void handle (Plugin& p, const clap_event_header* e, const clap_output_events* ou
     }
 }
 
+// Flush can deliver values even while stopped. A press waits for process and its transport,
+// and later edits wait behind it. Keep the last undelivered value if the host's output queue fills.
+void takePageCommands (Plugin& p, const clap_output_events* out, bool allowPress)
+{
+    if (!p.pageWaiting.load (std::memory_order_acquire) || !tryLockAudio (p)) return;
+    uint64_t now = 0;
+    while (p.taken != p.written)
+    {
+        const auto& command = p.commands[p.taken % Plugin::pageCapacity];
+        const auto& edit = command.edit;
+        if (edit.press)
+        {
+            if (!allowPress) break;
+            if (!now) now = steadyMs();
+            if (now - command.time <= 500)
+            {
+                clap_event_param_value press {};
+                press.header = {sizeof (press), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0};
+                press.param_id = edit.id;
+                press.value = 1;
+                handle (p, &press.header, out, 0);
+            }
+        }
+        else
+        {
+            const int i = paramIndex (edit.id);
+            auto& pending = p.edits[i];
+            p.engine.set (edit.id, edit.value);
+            p.values[i].store (edit.value, std::memory_order_relaxed);
+            if (--pending.queued == 0) p.feed.preview[i].store (ScreenFeed::noEdit, std::memory_order_release);
+            pending.tellValue = edit.value;
+            pending.tell = !pushValue (out, 0, edit.id, edit.value, 0);
+        }
+        ++p.taken;
+    }
+    bool waiting = p.taken != p.written;
+    for (uint32_t i = 0; i < paramCount; ++i)
+    {
+        auto& pending = p.edits[i];
+        if (pending.tell) pending.tell = !pushValue (out, 0, paramTable[i].id, pending.tellValue, 0);
+        waiting |= pending.tell;
+    }
+    p.pageWaiting.store (waiting, std::memory_order_release);
+    unlock (p);
+}
+
 // What the engine changed itself (Bit Flip, Bit Shift, Corrupt, Recall), as the parameters' values the host hears at
 // `time`, and a buffer Save wrote. If the main thread has the exchange, they wait for a later block (the engine keeps
 // them). If it loaded values since `since` (the loads count when the block began), those stand: the engine's changes
@@ -193,6 +298,7 @@ void publish (Plugin& p, const clap_output_events* out, uint32_t time, uint32_t 
     while (p.engine.takeChange (id, value))
         if (! loaded)
         {
+            p.audioValuesMoved = true;
             p.values[paramIndex (id)].store (value, std::memory_order_relaxed);
             pushValue (out, time, id, value);
         }
@@ -204,6 +310,8 @@ void publish (Plugin& p, const clap_output_events* out, uint32_t time, uint32_t 
         for (uint32_t i = 0; i < seqStateCount; ++i)
             p.buffer[i].store (saved[i], std::memory_order_relaxed);
         p.bufferFull.store (true, std::memory_order_relaxed);
+        p.bufferRevision.fetch_add (1, std::memory_order_release);
+        p.audioValuesMoved = true;
     }
     unlock (p);
 }
@@ -214,10 +322,12 @@ void paramsFlush (const clap_plugin* plugin, const clap_input_events* in, const 
 {
     auto& p = of (plugin);
     const uint32_t since = p.loads.load (std::memory_order_acquire);
-    const uint32_t count = in->size (in);
+    takePageCommands (p, out, false);
+    const uint32_t count = in ? in->size (in) : 0;
     for (uint32_t i = 0; i < count; ++i)
         handle (p, in->get (in, i), out, 0);
     publish (p, out, 0, since);
+    publishScreen (p);
 }
 
 const clap_plugin_params paramsExtension { paramsCount, paramsInfo, paramsValue, paramsToText, paramsFromText, paramsFlush };
@@ -263,12 +373,19 @@ void loadAll (Plugin& p, const float* values, const float* buffer = nullptr, boo
 {
     lockMain (p);
     for (uint32_t i = 0; i < paramCount; ++i)
+    {
         p.values[i].store (values[i], std::memory_order_relaxed);
+        p.edits[i] = {};
+        p.feed.preview[i].store (ScreenFeed::noEdit, std::memory_order_release);
+    }
+    p.taken = p.written;
+    p.pageWaiting.store (false, std::memory_order_release);
     if (buffer != nullptr)
     {
         for (uint32_t i = 0; i < seqStateCount; ++i)
             p.buffer[i].store (buffer[i], std::memory_order_relaxed);
         p.bufferFull.store (full, std::memory_order_relaxed);
+        p.bufferRevision.fetch_add (1, std::memory_order_release);
         p.bufferLoaded.store (true, std::memory_order_release);
     }
     p.loads.fetch_add (1, std::memory_order_release);
@@ -281,7 +398,9 @@ void loadAll (Plugin& p, const float* values, const float* buffer = nullptr, boo
                 p.engine.set (paramTable[i].id, values[i]);
         if (buffer != nullptr)
             p.engine.setBuffer (full, buffer);
+        publishScreen (p);
     }
+    requestPaint (p);
 }
 
 bool stateSave (const clap_plugin* plugin, const clap_ostream* stream)
@@ -293,7 +412,7 @@ bool stateSave (const clap_plugin* plugin, const clap_ostream* stream)
     Pair values[paramCount], buffer[seqStateCount];
     lockMain (p);
     for (uint32_t i = 0; i < paramCount; ++i)
-        values[i] = { paramTable[i].id, p.values[i].load (std::memory_order_relaxed) };
+        values[i] = { paramTable[i].id, p.feed.value (p.values, i) };
     for (uint32_t i = 0; i < seqStateCount; ++i)
         buffer[i] = { seqStateIds[i], p.buffer[i].load (std::memory_order_relaxed) };
     const uint32_t buffered[2] = { p.bufferFull.load (std::memory_order_relaxed) ? 1u : 0u, seqStateCount };
@@ -413,8 +532,11 @@ const clap_plugin_note_ports noteExtension { noteCount, noteGet };
 bool pluginInit (const clap_plugin* plugin)
 {
     auto& p = of (plugin);
+    p.hostScreen = static_cast<const clap_host_melodee_screen*> (p.host->get_extension (p.host, CLAP_EXT_MELODEE_SCREEN_HOST));
+    p.hostParams = static_cast<const clap_host_params*> (p.host->get_extension (p.host, CLAP_EXT_PARAMS));
     for (uint32_t i = 0; i < paramCount; ++i)
     {
+        p.feed.preview[i].store (ScreenFeed::noEdit, std::memory_order_relaxed);
         p.values[i].store (paramTable[i].def, std::memory_order_relaxed);
         p.engine.set (paramTable[i].id, paramTable[i].def);
     }
@@ -441,7 +563,12 @@ bool pluginActivate (const clap_plugin* plugin, double rate, uint32_t, uint32_t)
 void pluginDeactivate (const clap_plugin* plugin) { of (plugin).active = false; }
 bool pluginStart (const clap_plugin*) { return true; }
 void pluginStop (const clap_plugin*) {}
-void pluginReset (const clap_plugin* plugin) { of (plugin).engine.reset(); }
+void pluginReset (const clap_plugin* plugin)
+{
+    auto& p = of (plugin);
+    p.engine.reset();
+    publishScreen (p);
+}
 
 // Denormals: flush them to zero for the block (the filter and envelopes decay into them), as the FPU had it after.
 struct FlushDenormals
@@ -481,6 +608,8 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         p.engine.setBuffer (p.bufferFull.load (std::memory_order_relaxed), values);
     }
 
+    takePageCommands (p, process->out_events, false);
+
     // Settings at the block's first frame come first, the transport after them: a setting the host sends with Play
     // is in place for what Play does. Buttons and notes at that frame come after the transport: they act on where
     // the sequences are once it moved (a Reset with Play sticks; a note with Play transposes without playing).
@@ -511,6 +640,7 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     else
         p.engine.transport (false, 0.0, 120.0, frames);
 
+    takePageCommands (p, process->out_events, true);
     uint32_t next = 0, done = 0;
     while (done < frames)
     {
@@ -536,13 +666,71 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
 
     // What the engine changed itself, heard by the host at the block's end.
     publish (p, process->out_events, last, since);
+    publishScreen (p);
     // Never "sleep": the sequencers must hear the next Play, which is no event. (Melodee puts an idle instrument to
     // sleep itself, and the engine skips its own work while the VCAs are closed.)
     return CLAP_PROCESS_CONTINUE;
 }
 
+bool screenPaint (const clap_plugin* plugin, const melodee_screen_canvas_t* c)
+{
+    if (!c || !c->pixels || c->width != hdui::width || c->height != hdui::height || c->stride < c->width) return false;
+    auto& p = of (plugin);
+    if (p.paintedRevision != p.bufferRevision.load (std::memory_order_acquire))
+    {
+        std::array<float, seqStateCount> saved;
+        lockMain (p);
+        for (uint32_t i = 0; i < seqStateCount; ++i) saved[i] = p.buffer[i].load (std::memory_order_relaxed);
+        const bool full = p.bufferFull.load (std::memory_order_relaxed);
+        p.paintedRevision = p.bufferRevision.load (std::memory_order_relaxed);
+        unlock (p);
+        p.screen.setMemory (saved, full);
+    }
+    const bool drew = p.screen.paint (*c);
+    if (p.screen.animating()) requestPaint (p);
+    return drew;
+}
+
+bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* input)
+{
+    if (!input || input->kind > MELODEE_SCREEN_NUDGE) return false;
+    auto& p = of (plugin);
+    Screen::Edit edit;
+    if (!p.screen.input (*input, edit)) return false;
+    if (edit.id != CLAP_INVALID_ID)
+    {
+        lockMain (p);
+        if (p.written - p.taken == Plugin::pageCapacity)
+        {
+            unlock (p);
+            return false;
+        }
+        p.commands[p.written++ % Plugin::pageCapacity] = {edit, edit.press ? steadyMs() : 0};
+        if (!edit.press)
+        {
+            const int i = paramIndex (edit.id);
+            p.feed.preview[i].store (edit.value, std::memory_order_release);
+            ++p.edits[i].queued;
+        }
+        p.pageWaiting.store (true, std::memory_order_release);
+        unlock (p);
+        if (!edit.press)
+        {
+            if (p.hostParams && p.hostParams->rescan) p.hostParams->rescan (p.host, CLAP_PARAM_RESCAN_VALUES);
+            if (p.hostParams && p.hostParams->request_flush) p.hostParams->request_flush (p.host);
+        }
+        if (p.host->request_process) p.host->request_process (p.host);
+    }
+    requestPaint (p);
+    return true;
+}
+
+void screenKnobs (const clap_plugin* plugin, clap_id ids[3]) { of (plugin).screen.knobs (ids); }
+const clap_plugin_melodee_screen screenExtension { screenPaint, screenInput, screenKnobs };
+
 const void* pluginExtension (const clap_plugin*, const char* id)
 {
+    if (std::strcmp (id, CLAP_EXT_MELODEE_SCREEN) == 0) return &screenExtension;
     if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &paramsExtension;
     if (std::strcmp (id, CLAP_EXT_STATE) == 0) return &stateExtension;
     if (std::strcmp (id, CLAP_EXT_AUDIO_PORTS) == 0) return &audioExtension;
