@@ -9,7 +9,7 @@ CONTEXT=${DOCKER_CONTEXT:-colima-melodee}
 SECONDS_RUN=${1:-4}
 docker --context "$CONTEXT" run --rm --platform linux/arm64 -v "$PWD:/work" -w /work melodee-profiler sh -c "
     make -s build/bench >/dev/null
-    for mode in worst typical stopped; do
+    for mode in worst typical turning stopped; do
         build/bench \$mode $SECONDS_RUN
         refs=\$(valgrind --tool=callgrind --callgrind-out-file=build/callgrind.\$mode build/bench \$mode $SECONDS_RUN 2>&1 | grep -o 'refs: *[0-9,]*' | tr -d 'refs: ,')
         base=\$(valgrind --tool=callgrind --callgrind-out-file=/dev/null build/bench \$mode 0 2>&1 | grep -o 'refs: *[0-9,]*' | tr -d 'refs: ,')

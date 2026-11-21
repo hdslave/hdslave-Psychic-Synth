@@ -41,7 +41,8 @@ Each sequencer has 8 **bits**. A bit is on or off, and each holds a CV between â
 - **Bit Shift** rotates the sequence one bit to the right, and the last bit comes round to bit 1.
 - **Chain Seq** makes one ring of SEQ 1's bits followed by SEQ 2's (up to 16). Both play heads run round it, together
   when chaining starts. Then **Bit Shift 1** rotates the whole ring, and **Bit Shift 2** moves SEQ 2's play head on a
-  bit, opening a gap between the two heads. To bring the heads back together, turn Chain Seq off and on.
+  bit, opening a gap between the two heads. The gap holds through jumps and loops; turn Chain Seq off and on, or
+  play from a stop, to bring the heads back together.
 - **EG Trig Mix** sets how hard each sequencer's triggers hit the envelopes. Fully left, SEQ 1's triggers fire at full
   and SEQ 2's do nothing. Fully right, the reverse. In the middle, each fires at half, and both together at full, so
   where the two patterns meet you get an accent.
@@ -111,7 +112,8 @@ The panel's names, in the order Melodee's Edit page lists them (three to a page)
 As on the panel, a note transposes the quantized sequences. Each note moves the scale's root by its distance from
 middle C (60), and the transposition holds until the next note. Unquantized, notes do not transpose. While the
 sequences are not running (the host stopped, or Run off), a note also fires both envelopes, at the note's velocity,
-so the stopped Psychic plays like a mono synth.
+so the stopped Psychic plays like a mono synth. A note on Play's own frame counts as running (it transposes); one on
+Stop's frame plays.
 
 ## Presets
 
@@ -134,11 +136,21 @@ The test build renders each preset as `build/demo-<key>.wav` to listen to.
 
 - A clock lands on every multiple of Clock Div, counted from the song's top, while the host plays. With Swing, every
   second clock is late. Play from the top plays bit 1 on its first frame, and each later step lands on its frame.
-- A Play or a jump places each play head by the song's place: the clock's number from the top, round its ring. So
-  Play from the top always starts both sequences at bit 1, and polymeters line up the same way each time.
+  Clock Div (or Clock 2) changed on a step's frame still plays that step, then goes on on the new grid.
+- A Play places each play head by the song's place: the clock's number from the top, round its ring. So Play from the
+  top always starts both sequences at bit 1, and polymeters line up the same way each time. A pre-roll before the
+  top plays the ring's last bits, and bit 1 lands on the top.
 - Stop stops the sequences, and sounds ring out. Play again starts from where the song is.
-- A jump, or a loop going round, lines the sequences up with the song's place again. A wrap that falls inside a block
-  still plays that step, at the start of the next block.
+- A jump, or a loop going round, lines the sequences up with the song's place again, each play head keeping its
+  distance from it: what Reset, Advance and Bit Shift 2 did holds through the loop.
+- Melodee tells a plug-in where the song is only at its own blocks: a loop whose end falls inside a block is told
+  at the next one. The loop's first step has already played on its frame by then (the loop's end is its start), so
+  it is not played again; the sequences just line up with it. If that step was silent where the count had run on to
+  (a ring that does not divide the loop) and the loop's first step is on, it sounds at the start of the next block.
+- A host whose count drifts from Psychic's (its tempo moving inside a block) is followed without a jump: every step
+  plays once. Tempos past 1000 BPM are taken as 1000.
+- Settings the host sends on Play's own frame are in place for Play. Buttons sent then (a Reset, say) act after Play
+  has placed the heads, so they stick.
 - Run off: the host plays but the sequences hold where they are and stay silent. Advance and Trigger work as on the
   panel, and notes play. Run on again goes on from where they held, at the next clock.
 - In Melodee, keep the plug-in's **TRANSPORT** on (the default): with it off the plug-in never hears Play.
@@ -173,9 +185,11 @@ half-band FIR. Instructions a 128-frame block takes, from `tools/bench.sh` (call
 |---|---|---|
 | Everything busy (Drone, FM, ring, noise, folding moved by EG1 and the Mod VCO, resonance, both sequencers corrupting on their own clocks) | about 82,000 | 1.7 % |
 | The default patch at 1/16 with a little Corrupt | about 81,000 | 1.7 % |
-| Stopped | under 600 | 0.01 % |
+| The same with two knobs turning all the time (Cutoff and Fold every 16 frames) | about 92,000 | 1.9 % |
+| Stopped | under 800 | 0.02 % |
 
-While both envelopes are idle and the VCAs closed, the oscillators and filter are skipped. The real share on the MPC
+While both envelopes are idle and the VCAs closed, the oscillators and filter are skipped. A knob's change is worked
+out every 8 frames; the envelopes' and Noise Tone's rates (which need `exp` and `pow`) only when those knobs move. The real share on the MPC
 depends on how many instructions the A55 retires a cycle on this code. Melodee's plug-in load figure measures it.
 
 ## Build and test
@@ -185,7 +199,7 @@ Needs Docker with a Linux arm64 context (Melodee's `colima-melodee` and its `mel
 ```sh
 ./build.sh          # build/Psychic.clap, then the tests (tests/host.cpp), the sound's fingerprint and demo renders build/demo-*.wav
 ./build.sh bench    # build/bench
-tools/bench.sh      # instruction counts (Melodee's melodee-profiler image)
+tools/bench.sh      # instruction counts for worst, typical, turning and stopped (Melodee's melodee-profiler image)
 ```
 
 The tests load the plug-in through the CLAP API and check:
@@ -195,7 +209,18 @@ The tests load the plug-in through the CLAP API and check:
 - state save and load, the buffer travelling with it, and a state without one;
 - the presets, as preset discovery lists them and preset-load loads them;
 - step timing to the frame at 44.1, 48 and 96 kHz, two tempos and Swing; stop, restart, jumps, a loop wrapping
-  inside a block, and a host without a song position;
+  inside a block, a host without a song position, a pre-roll, a tempo ramping from 120 to 240 BPM (each step once,
+  in 128, 256 and 512-frame blocks) and absurd tempos;
+- Clock Div changed on a step's frame (that step plays), and on Clock 2's step (Clock 2 untouched); a state loaded
+  between two blocks with a step on the next one's first frame;
+- what Reset and Bit Shift 2 did, kept through a two-bar loop; Run off and on; Lengths and Chain Seq changed while
+  playing, the heads past the ring's end;
+- Drone switched on, the same whatever the block size; notes and Reset on Play's and Stop's frames; notes in the MIDI
+  dialect; flush with values and buttons, active and not;
+- a state loaded while a block plays, in the block where the engine changes a value or Save is pressed (the loaded
+  values and buffer stand, even a value equal to the one before the change);
+- a two-bar loop as Melodee plays it, its end inside a block: every step once, on its frame; a ring of 5 in it;
+- odd text: empty, `nan`, padded choice names, numbers in place of names, a unit's edge;
 - the same output and the same values heard back whatever the block size (1, 37, 128, 4096 frames), with the dice
   rolling;
 - the bits as hits, EG Trig Mix (each end, the middle, and both at once twice as loud), polymeter Lengths, Bit Shift,
@@ -208,15 +233,17 @@ The tests load the plug-in through the CLAP API and check:
 - routing: Order and Blend (each path the same to the bit where it should be), Fold clean at 0, Noise Tone and Drone;
 - finite, bounded output at 60 random and extreme settings, buttons pressed.
 
-`tests/fingerprint.cpp` then renders 51 fixed scenarios and hashes every output sample's bits, and the values the
+`tests/fingerprint.cpp` then renders 53 fixed scenarios and hashes every output sample's bits, and the values the
 plug-in tells the host it changed, against `tests/fingerprint.txt`. The scenarios: each preset, the bench's patches,
 24 random patches with the buttons, MIDI and knobs moving, other block sizes and rates, stop and jumps, Corrupt
-across its turn, chained moves and the buffer, Clock 2 with Swing, notes, and each Order. Work meant to keep the
+across its turn, chained moves and the buffer, Clock 2 with Swing, notes, each Order, and two-bar loops as Melodee
+plays them. Work meant to keep the
 sound, such as a speed-up, must leave every hash as it is. A change meant to change the sound updates them with
 `make fingerprint-update` (run inside the build image). The hashes hold for Melodee's build image and these compiler
 flags.
 
 ## Install
 
-Copy `build/Psychic.clap` to `Melodee/Plugins/hdslave Psychic/hdslave Psychic.clap` on the card (or the staged card's folder),
-then pick it on an empty track: Stage, Plugin, hdslave Psychic. It needs only libc and libm (glibc 2.35 or older).
+Copy `build/Psychic.clap` to `Melodee/Plugins/hdslave Psychic/hdslave Psychic.clap` on the card (or the staged
+card's folder), then pick it on an empty track: Stage, Plugin, hdslave Psychic. It needs only libc and libm (glibc
+2.35 or older).

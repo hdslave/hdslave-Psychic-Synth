@@ -48,7 +48,7 @@ constexpr PresetValue chainMelody[] = {
     { fmAmt, 0.25f }, { modFreq, 0.77f }, { vcoLevel, 0.6f }, { modLevel, 0.15f }, { fold, 0.12f }, { vcwEg1Amt, 0.2f },
     { blend, 0.6f }, { cutoff, 0.55f }, { resonance, 0.4f }, { vcfEg1Amt, 0.35f }, { vcfSeq2Amt, 0.3f }, { eg1Decay, 0.3f },
     { eg2Decay, 0.42f }, { cvRange1, 0.25f }, { cvRange2, 0.25f }, { egTrigMix, 0.5f }, { bits1, 1 + 2 + 8 + 16 + 32 },
-    { bits2, 1 + 4 + 8 + 16 }, { writeHead2, 0.0f },
+    { bits2, 1 + 4 + 8 + 16 },
     { cv1 + 1, 0.4f }, { cv1 + 3, -0.2f }, { cv1 + 4, 0.6f }, { cv2 + 0, 0.8f }, { cv2 + 2, -0.5f }, { cv2 + 3, 0.3f }, { cv2 + 4, 0.1f },
 };
 constexpr PresetValue polyrhythm[] = {

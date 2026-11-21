@@ -137,6 +137,22 @@ std::vector<Scenario> scenarios()
         s.events = { { 60000, Event::param, "Blend", 0.0 }, { 120000, Event::param, "Blend", 1.0 }, { 150000, Event::param, "Filter Mode", 1.0 } };
         list.push_back (s);
     }
+    // 0.1.1: a two-bar loop as Melodee plays it, its end falling inside a block (told at the next block's start),
+    // through two clocks on their own grids, and chained with Bit Shift 2's gap and the dice.
+    for (const char* key : { "polyrhythm", "chain-melody" })
+    {
+        Scenario s;
+        s.name = std::string ("melodee-loop-") + key;
+        s.preset = key;
+        s.bpm = 8.0 * 60.0 * 48000.0 / (128.0 * 1384 + 8);
+        s.seconds = 9.0;
+        if (std::string (key) == "chain-melody")
+            s.values = { { "Corrupt 1", 0.8 }, { "Corrupt 2", 0.3 } }, s.events = { { 30000, Event::param, "Bit Shift 2", 1.0 } };
+        s.transport = [] (uint64_t at, double bpm, double rate) -> std::pair<bool, double> {
+            return { true, std::fmod ((double) at * bpm / 60.0 / rate, 8.0) };
+        };
+        list.push_back (s);
+    }
     return list;
 }
 } // namespace

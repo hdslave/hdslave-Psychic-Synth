@@ -57,8 +57,20 @@ struct Events
 {
     struct Any { union { clap_event_header header; clap_event_param_value param; clap_event_note note; clap_event_midi midi; }; };
     std::vector<Any> list;
+    // Run once when the plug-in first reads event `hookAt`: something the main thread does in the middle of a block.
+    std::function<void()> hook;
+    uint32_t hookAt = ~0u;
     clap_input_events in { this, [] (const clap_input_events* e) { return (uint32_t) static_cast<const Events*> (e->ctx)->list.size(); },
-                           [] (const clap_input_events* e, uint32_t i) { return &static_cast<const Events*> (e->ctx)->list[i].header; } };
+                           [] (const clap_input_events* e, uint32_t i) -> const clap_event_header* {
+                               auto* self = static_cast<Events*> (e->ctx);
+                               if (i == self->hookAt && self->hook)
+                               {
+                                   auto run = std::move (self->hook);
+                                   self->hook = nullptr;
+                                   run();
+                               }
+                               return &self->list[i].header;
+                           } };
     void param (uint32_t time, clap_id id, double value)
     {
         Any a {};
@@ -69,6 +81,12 @@ struct Events
     {
         Any a {};
         a.note = { { sizeof (clap_event_note), time, CLAP_CORE_EVENT_SPACE_ID, type, 0 }, -1, 0, 0, key, velocity };
+        list.push_back (a);
+    }
+    void midi (uint32_t time, uint8_t status, uint8_t a1, uint8_t a2)
+    {
+        Any a {};
+        a.midi = { { sizeof (clap_event_midi), time, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_MIDI, 0 }, 0, { status, a1, a2 } };
         list.push_back (a);
     }
     void sort() { std::stable_sort (list.begin(), list.end(), [] (const Any& a, const Any& b) { return a.header.time < b.header.time; }); }
@@ -105,6 +123,7 @@ struct Transport
 {
     bool playing = true;
     double bpm = 120.0, beats = 0.0;
+    bool placed = true; // false: a host that sends no song position
 };
 
 struct Instance
@@ -190,7 +209,7 @@ struct Instance
             const auto t = transport (at);
             clap_event_transport tr {};
             tr.header = { sizeof (clap_event_transport), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_TRANSPORT, 0 };
-            tr.flags = CLAP_TRANSPORT_HAS_TEMPO | (t.beats >= 0.0 ? CLAP_TRANSPORT_HAS_BEATS_TIMELINE : 0) | (t.playing ? CLAP_TRANSPORT_IS_PLAYING : 0);
+            tr.flags = CLAP_TRANSPORT_HAS_TEMPO | (t.placed ? CLAP_TRANSPORT_HAS_BEATS_TIMELINE : 0) | (t.playing ? CLAP_TRANSPORT_IS_PLAYING : 0);
             tr.tempo = t.bpm;
             tr.song_pos_beats = (clap_beattime) std::llround (t.beats * (double) CLAP_BEATTIME_FACTOR);
             Events e;
@@ -316,10 +335,14 @@ void testDescription()
     CHECK (factory->get_plugin_count (factory) == 1);
     const auto* d = factory->get_plugin_descriptor (factory, 0);
     CHECK (d != nullptr && std::string (d->name) == "hdslave Psychic" && std::string (d->id) == "com.hdslave.psychic");
-    bool instrument = false;
+    bool instrument = false, stereo = false, mono = false;
     for (const char* const* f = d->features; f && *f; ++f)
+    {
         instrument |= std::strcmp (*f, CLAP_PLUGIN_FEATURE_INSTRUMENT) == 0;
-    CHECK (instrument);
+        stereo |= std::strcmp (*f, CLAP_PLUGIN_FEATURE_STEREO) == 0;
+        mono |= std::strcmp (*f, CLAP_PLUGIN_FEATURE_MONO) == 0;
+    }
+    CHECK (instrument && stereo && ! mono); // its one output is a stereo port
 
     Instance a;
     const auto* audio = static_cast<const clap_plugin_audio_ports*> (a.plugin->get_extension (a.plugin, CLAP_EXT_AUDIO_PORTS));
@@ -449,6 +472,25 @@ void testState()
     f.setup ({ { "Bits 1", 9 } });
     f.render (256, 128, l1, r1, stopped, f.pressAt ({ { 5, "Recall" } }));
     CHECK (f.value ("Bits 1") == 9);
+
+    // A state loaded on the main thread while a block plays, in the block where the engine changes the same value
+    // itself (Bit Flip): the loaded value stands, and the engine follows it from the next block.
+    Instance g;
+    g.setup ({ { "Bits 1", 1 } });
+    Instance h;
+    h.setup ({ { "Bits 1", 0x81 } });
+    const auto loaded = saveState (h);
+    g.render (512, 128, l1, r1, from0, [&] (uint64_t at, uint32_t, Events& e) {
+        if (at != 256)
+            return;
+        e.param (10, g.id ("Bit Flip 1"), 1.0); // the engine flips a bit at frame 10
+        e.param (100, g.id ("Volume"), 0.7);     // reading this event, the "main thread" loads the state
+        e.hookAt = 1;
+        e.hook = [&] { CHECK (loadState (g, loaded)); };
+    });
+    CHECK (g.value ("Bits 1") == 0x81);
+    g.render (256, 128, l1, r1, from0);
+    CHECK (g.value ("Bits 1") == 0x81);
 }
 
 // The factory presets: listed by preset discovery as a host's browser reads them, loaded by key through
@@ -648,7 +690,7 @@ void testStopRestartJump()
     // A host with no song position: the sequences count from Play themselves.
     Instance d;
     d.setup (clickPatch (d));
-    d.render (48000 * 2, 128, l, r, [] (uint64_t) { return Transport { true, 120.0, -1.0 }; });
+    d.render (48000 * 2, 128, l, r, [] (uint64_t) { return Transport { true, 120.0, 0.0, false }; });
     hits = onsets (l);
     CHECK (hits.size() == 8);
     for (size_t i = 0; i < hits.size(); ++i)
@@ -1117,6 +1159,345 @@ void testExtremes()
     }
 }
 
+// Each hit's energy (as peaksOf), for telling a hit struck twice from one struck once.
+std::vector<float> energies (const std::vector<float>& x, const std::vector<long>& hits) { return peaksOf (x, hits); }
+
+void testClockChanges()
+{
+    std::vector<float> l, r;
+    // Clock Div changed on a step's frame (beat 2, frame 48,000, from 1/8 to 1/16): that step still plays, and the
+    // new grid goes on from it.
+    for (const char* to : { "1/16", "1/4", "1/8T" })
+    {
+        Instance a;
+        a.setup (clickPatch (a));
+        const double div = a.valueOf ("Clock Div", to);
+        a.render (96000, 128, l, r, from0, [&] (uint64_t at, uint32_t n, Events& e) {
+            if (48000 >= at && 48000 < at + n) e.param ((uint32_t) (48000 - at), a.id ("Clock Div"), div);
+        });
+        const auto hits = onsets (l);
+        printHits (to, hits);
+        const long next = std::string (to) == "1/16" ? 54000 : std::string (to) == "1/4" ? 72000 : 56000;
+        CHECK (std::find (hits.begin(), hits.end(), 48000L) != hits.end() && std::find (hits.begin(), hits.end(), next) != hits.end());
+    }
+    // Clock Div changed on a step of Clock 2's own grid (1/8T: frame 40,000) leaves Clock 2 alone: its step plays.
+    {
+        Instance a;
+        auto p = clickPatch (a, 0);
+        p.push_back ({ "Bits 2", 255 });
+        p.push_back ({ "EG Trig Mix", 1.0 });
+        p.push_back ({ "Clock 2", a.valueOf ("Clock 2", "1/8T") });
+        a.setup (p);
+        a.render (96000, 128, l, r, from0, [&] (uint64_t at, uint32_t n, Events& e) {
+            if (40000 >= at && 40000 < at + n) e.param ((uint32_t) (40000 - at), a.id ("Clock Div"), a.valueOf ("Clock Div", "1/16"));
+        });
+        CHECK ((stepsOf (onsets (l), 8000) == std::vector<long> { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }));
+    }
+    // A preset (here a state) loaded between two blocks, the next block's first frame a step: that step plays at the
+    // new Clock Div.
+    {
+        Instance a;
+        a.setup (clickPatch (a));
+        Instance b;
+        auto q = clickPatch (b);
+        q.push_back ({ "Clock Div", b.valueOf ("Clock Div", "1/16") });
+        b.setup (q);
+        const auto state = saveState (b);
+        a.render (48000, 128, l, r, from0);
+        CHECK (loadState (a, state));
+        a.render (24000, 128, l, r, [] (uint64_t at) { return playingFrom (2.0, 120.0, 48000.0, at); });
+        CHECK ((onsets (l) == std::vector<long> { 0, 6000, 12000, 18000 }));
+    }
+    // A host whose tempo ramps from 120 to 240 BPM over a second, its count kept per frame while each block hears the
+    // tempo at its start: our count drifts from the host's by a little each block. Every clock plays once, near its
+    // time: none twice (a hit struck twice would be louder), none lost.
+    for (uint32_t block : { 128u, 256u, 512u })
+    {
+        Instance a;
+        a.setup (clickPatch (a));
+        auto beatsAt = [] (double t) { return t <= 1.0 ? 2.0 * t + t * t : 3.0 + 4.0 * (t - 1.0); };
+        a.render (96000, block, l, r, [&] (uint64_t at) {
+            const double t = at / 48000.0;
+            return Transport { true, 120.0 + 120.0 * std::min (t, 1.0), beatsAt (t) };
+        });
+        const auto hits = onsets (l);
+        const auto e = energies (l, hits);
+        bool placed = hits.size() == 14; // clocks at 0, 0.5 ... 6.5 beats
+        for (size_t k = 0; placed && k < hits.size(); ++k)
+        {
+            const double b = 0.5 * k, t = b <= 3.0 ? -1.0 + std::sqrt (1.0 + b) : 1.0 + (b - 3.0) / 4.0;
+            placed = std::labs (hits[k] - std::lround (t * 48000.0)) <= (long) block;
+        }
+        const float most = *std::max_element (e.begin(), e.end()), least = *std::min_element (e.begin(), e.end());
+        if (debug()) std::printf ("debug ramp %u: %zu hits, energy %.4f..%.4f\n", block, hits.size(), least, most);
+        CHECK (placed && most < least * 1.1f);
+    }
+    // A tempo no host should send (infinite, 1e13 BPM): taken as 1000 BPM; the block returns, its output finite.
+    for (double bpm : { 1.0e13, (double) INFINITY })
+    {
+        Instance a;
+        a.setup (clickPatch (a));
+        a.render (4096, 128, l, r, [bpm] (uint64_t at) { return Transport { true, bpm, (double) at * 1000.0 / 60.0 / 48000.0 }; });
+        bool finite = true;
+        for (float s : l)
+            finite &= std::isfinite (s);
+        CHECK (finite && ! onsets (l).empty());
+    }
+    // A song position before the top (a pre-roll from beat -1): steps there are the ring's last ones; bit 1 lands on
+    // the top.
+    {
+        Instance a;
+        a.setup (clickPatch (a, 1));
+        a.render (144000, 128, l, r, [] (uint64_t at) { return playingFrom (-1.0, 120.0, 48000.0, at); });
+        printHits ("pre-roll", onsets (l));
+        CHECK ((onsets (l) == std::vector<long> { 24000, 120000 }));
+    }
+}
+
+void testOffsetsThroughLoops()
+{
+    std::vector<float> l, r;
+    // A two-bar loop (16 eighths) going round: what Reset did stays. Reset in step 3 makes bit 1 play on step 4; after
+    // the wrap it still does.
+    auto loop = [] (uint64_t at) { return playingFrom (0.0, 120.0, 48000.0, at % 192000); };
+    {
+        Instance a;
+        a.setup (clickPatch (a, 1));
+        a.render (384000, 128, l, r, loop, a.pressAt ({ { 30000, "Reset" } }));
+        CHECK ((stepsOf (onsets (l), 12000) == std::vector<long> { 0, 3, 11, 19, 27 }));
+    }
+    // Chained, Bit Shift 2 opens a gap of a bit between the heads (SEQ 2's ahead); the loop keeps it. Only SEQ 1's
+    // ring bit 1 is on: head 1 plays it on steps 0, 8; head 2 on steps 7, 15.
+    {
+        Instance a;
+        auto p = clickPatch (a, 1);
+        p.push_back ({ "Bits 2", 0 });
+        p.push_back ({ "Length 1", 4 });
+        p.push_back ({ "Length 2", 4 });
+        p.push_back ({ "Chain Seq", 1.0 });
+        p.push_back ({ "EG Trig Mix", 0.5 });
+        a.setup (p);
+        a.render (384000, 128, l, r, loop, a.pressAt ({ { 6000, "Bit Shift 2" } }));
+        CHECK ((stepsOf (onsets (l), 12000) == std::vector<long> { 0, 7, 8, 15, 16, 23, 24, 31 }));
+        // Played again from a stop, the heads start together.
+        a.render (48000, 128, l, r, stopped);
+        a.render (24000, 128, l, r, from0);
+        CHECK ((onsets (l) == std::vector<long> { 0 }));
+    }
+    // Run off holds the sequence (no steps), Run on goes on from where it held at the next clock. Bits 1 and 3 on.
+    {
+        Instance a;
+        a.setup (clickPatch (a, 1 + 4));
+        a.render (144000, 128, l, r, from0, [&] (uint64_t at, uint32_t n, Events& e) {
+            if (30000 >= at && 30000 < at + n) e.param ((uint32_t) (30000 - at), a.id ("Run"), 0.0);
+            if (60000 >= at && 60000 < at + n) e.param ((uint32_t) (60000 - at), a.id ("Run"), 1.0);
+        });
+        CHECK ((onsets (l) == std::vector<long> { 0, 24000, 120000 }));
+    }
+    // Lengths and Chain Seq changed while it plays, the heads past the ring's new end: they go round, the steps stay
+    // on the grid, nothing breaks.
+    {
+        Instance a;
+        auto p = clickPatch (a, 0x55);
+        p.push_back ({ "Bits 2", 0xaa });
+        p.push_back ({ "EG Trig Mix", 0.5 });
+        p.push_back ({ "Clock Div", a.valueOf ("Clock Div", "1/16") });
+        a.setup (p);
+        a.render (240000, 128, l, r, from0, [&] (uint64_t at, uint32_t n, Events& e) {
+            const struct { uint64_t when; const char* name; double v; } moves[] = {
+                { 20000, "Chain Seq", 1.0 }, { 50000, "Length 1", 2.0 }, { 70000, "Bit Shift 2", 1.0 }, { 90000, "Length 2", 1.0 },
+                { 110000, "Chain Seq", 0.0 }, { 130000, "Length 1", 7.0 }, { 150000, "Chain Seq", 1.0 }, { 170000, "Length 2", 8.0 } };
+            for (auto& m : moves)
+                if (m.when >= at && m.when < at + n)
+                    e.param ((uint32_t) (m.when - at), a.id (m.name), m.v);
+        });
+        const auto hits = onsets (l);
+        bool grid = hits.size() > 20;
+        for (long h : hits)
+            grid &= h % 6000 == 0;
+        CHECK (grid);
+    }
+}
+
+// Melodee tells a plug-in the song's place only at its own blocks, counting on through a block as if it did not loop:
+// a loop whose end falls inside a block is told at the next block's start, its first step already played on the
+// right frame (the loop's end is its start). That step must not play again.
+void testMidBlockLoop()
+{
+    std::vector<float> l, r;
+    // A 2-bar loop ending 8 frames into a block (177,160 frames: about 130.05 BPM), told 120 frames late.
+    constexpr double loopFrames = 128.0 * 1384 + 8, bpm = 8.0 * 60.0 * 48000.0 / loopFrames;
+    auto melodee = [] (uint64_t at) { return Transport { true, bpm, std::fmod ((double) at * bpm / 60.0 / 48000.0, 8.0) }; };
+    {
+        Instance a;
+        a.setup (clickPatch (a));
+        a.render ((uint32_t) (3 * loopFrames), 128, l, r, melodee);
+        const auto hits = onsets (l);
+        const auto e = energies (l, hits);
+        bool placed = hits.size() == 48;
+        for (size_t k = 0; placed && k < hits.size(); ++k)
+            placed = std::labs (hits[k] - (long) std::ceil (k * loopFrames / 16.0 - 1.0e-6)) <= 1;
+        const float most = *std::max_element (e.begin(), e.end()), least = *std::min_element (e.begin(), e.end());
+        if (debug()) std::printf ("debug mid-block loop: %zu hits, energy %.4f..%.4f\n", hits.size(), least, most);
+        CHECK (placed && most < least * 1.1f); // a step struck twice would be louder
+    }
+    // A ring of 5 (bit 1 only) in the 16-step loop: the step the count ran on to at the loop's end is silent, the
+    // loop's first is not: it sounds, at the start of the block that tells of the wrap.
+    {
+        Instance a;
+        auto p = clickPatch (a, 1);
+        p.push_back ({ "Length 1", 5 });
+        a.setup (p);
+        a.render ((uint32_t) (1.5 * loopFrames), 128, l, r, melodee);
+        const auto hits = onsets (l);
+        printHits ("mid-block loop, ring 5", hits);
+        CHECK (std::find (hits.begin(), hits.end(), (long) loopFrames + 120) != hits.end());
+        CHECK (std::find (hits.begin(), hits.end(), (long) loopFrames) == hits.end());
+    }
+}
+
+void testHostEdges()
+{
+    std::vector<float> l, r, l2, r2;
+    // Drone switched on while nothing sounds: it sounds from that frame, whatever the block size.
+    std::vector<float> first;
+    for (uint32_t block : { 128u, 1u, 37u, 4096u })
+    {
+        Instance a;
+        a.render (24000, block, l, r, stopped, [&] (uint64_t at, uint32_t n, Events& e) {
+            if (1000 >= at && 1000 < at + n) e.param ((uint32_t) (1000 - at), a.id ("Drone"), 1.0);
+        });
+        if (block == 128)
+        {
+            first = l;
+            CHECK ((onsets (l) == std::vector<long> { 1000 }));
+        }
+        else
+            CHECK (l == first);
+    }
+    // A note on Play's first frame transposes but does not play (the sequences run from that frame); a note on Stop's
+    // first frame plays (they no longer run).
+    {
+        Instance a;
+        a.setup (clickPatch (a, 0));
+        a.render (48000, 128, l, r, [] (uint64_t at) {
+            if (at < 12800) return Transport { false, 120.0, 0.0 };
+            if (at < 25600) return playingFrom (0.0, 120.0, 48000.0, at - 12800);
+            return Transport { false, 120.0, 0.0 };
+        }, [&] (uint64_t at, uint32_t, Events& e) {
+            if (at == 12800 || at == 25600) e.note (0, CLAP_EVENT_NOTE_ON, 60, 1.0);
+        });
+        CHECK ((onsets (l) == std::vector<long> { 25600 }));
+    }
+    // A Reset sent with Play sticks (Play places the heads, then the Reset moves them): bit 1 on the second step.
+    {
+        Instance a;
+        a.setup (clickPatch (a, 1));
+        a.render (48000, 128, l, r, [] (uint64_t at) { return at < 12800 ? Transport { false, 120.0, 0.0 } : playingFrom (1.0, 120.0, 48000.0, at - 12800); },
+                  a.pressAt ({ { 12800, "Reset" } }));
+        CHECK ((onsets (l) == std::vector<long> { 12800 }));
+    }
+    // MIDI 1.0 notes (the MIDI dialect) do what CLAP notes do: stopped, a note on plays; a note on at velocity 0 is a
+    // note off and plays nothing.
+    {
+        Instance a;
+        a.setup (clickPatch (a, 0));
+        a.render (48000, 128, l, r, stopped, [&] (uint64_t at, uint32_t, Events& e) {
+            if (at == 1280) e.midi (3, 0x90, 64, 100);
+            if (at == 25600) e.midi (0, 0x90, 64, 0);
+        });
+        CHECK ((onsets (l) == std::vector<long> { 1283 }));
+    }
+    // Flush (no process call), active: values and buttons act as in process; the host hears what the engine changed.
+    {
+        Instance a;
+        a.setup ({ { "Bits 1", 1 } });
+        Events e;
+        e.param (0, a.id ("Bits 1"), 3);
+        e.param (0, a.id ("Bit Flip 1"), 1.0); // the write head is on bit 1: 3 becomes 2
+        OutEvents out;
+        a.params->flush (a.plugin, &e.in, &out.out);
+        CHECK (a.value ("Bits 1") == 2 && out.of (a.id ("Bits 1")).size() == 1 && out.of (a.id ("Bit Flip 1")).size() == 1);
+    }
+    // Flush before activation (the main thread, nothing running): the same.
+    {
+        const auto* d = factory->get_plugin_descriptor (factory, 0);
+        const clap_plugin* plugin = factory->create_plugin (factory, &host, d->id);
+        CHECK (plugin->init (plugin));
+        const auto* params = static_cast<const clap_plugin_params*> (plugin->get_extension (plugin, CLAP_EXT_PARAMS));
+        Instance names;
+        Events e;
+        e.param (0, names.id ("Bits 2"), 6);
+        e.param (0, names.id ("Bit Shift 2"), 1.0);
+        OutEvents out;
+        params->flush (plugin, &e.in, &out.out);
+        double v = 0.0;
+        CHECK (params->get_value (plugin, names.id ("Bits 2"), &v) && v == 12);
+        plugin->destroy (plugin);
+    }
+    // A state loaded while a block plays, in the block where Save is pressed: the loaded buffer stands.
+    {
+        Instance g;
+        g.setup ({ { "Bits 1", 128 } });
+        Instance h;
+        h.setup ({ { "Bits 1", 15 } });
+        h.render (256, 128, l, r, stopped, h.pressAt ({ { 0, "Save" } }));
+        h.setup ({ { "Bits 1", 7 } });
+        const auto loaded = saveState (h); // values: Bits 7; its buffer: Bits 15
+        g.render (256, 128, l, r, stopped, [&] (uint64_t at, uint32_t, Events& e) {
+            if (at != 128)
+                return;
+            e.param (10, g.id ("Save"), 1.0);
+            e.param (100, g.id ("Volume"), 0.7);
+            e.hookAt = 1;
+            e.hook = [&] { CHECK (loadState (g, loaded)); };
+        });
+        CHECK (g.value ("Bits 1") == 7);
+        g.render (256, 128, l, r, stopped, g.pressAt ({ { 10, "Recall" } }));
+        CHECK (g.value ("Bits 1") == 15);
+    }
+    // ...and where the engine changes a value to something else and back is the loaded one (a state with the same
+    // Bits as before the Bit Shift): the loaded value stands there too, and the engine has it from the next block.
+    {
+        Instance g;
+        g.setup (clickPatch (g, 1));
+        const auto same = saveState (g);
+        g.render (256, 128, l, r, from0, [&] (uint64_t at, uint32_t, Events& e) {
+            if (at != 128)
+                return;
+            e.param (10, g.id ("Bit Shift 1"), 1.0); // the engine: Bits 1 -> 2
+            e.param (100, g.id ("Volume"), 0.6);
+            e.hookAt = 1;
+            e.hook = [&] { CHECK (loadState (g, same)); }; // the main thread: Bits 1 (as it was)
+        });
+        CHECK (g.value ("Bits 1") == 1);
+        g.render (96000, 128, l, r, [] (uint64_t at) { return playingFrom (0.0, 120.0, 48000.0, at + 256); });
+        // Bit 1 again at the next bar (this render starts at song frame 256, the last hit still ringing into it), not
+        // bit 2 at the next step.
+        auto hits = onsets (l);
+        hits.erase (std::remove_if (hits.begin(), hits.end(), [] (long h) { return h < 2000; }), hits.end());
+        CHECK ((hits == std::vector<long> { 96000 - 256 }));
+    }
+    // Odd text: empty, not a number, padded, a choice by number only when nothing follows it.
+    {
+        Instance a;
+        double v = -1.0;
+        CHECK (! a.params->text_to_value (a.plugin, a.id ("Cutoff"), "", &v));
+        CHECK (! a.params->text_to_value (a.plugin, a.id ("Cutoff"), "nan", &v));
+        CHECK (! a.params->text_to_value (a.plugin, a.id ("Volume"), "inf %", &v));
+        CHECK (! a.params->text_to_value (a.plugin, a.id ("Clock Div"), "1/16x", &v));
+        CHECK (! a.params->text_to_value (a.plugin, a.id ("Clock Div"), "1/3", &v));
+        CHECK (! a.params->text_to_value (a.plugin, a.id ("Clock Div"), "12", &v));
+        CHECK (a.valueOf ("Clock Div", " 1/16 ") == 5.0 && a.valueOf ("Clock Div", "5") == 5.0 && a.valueOf ("Clock 2", " 1/16") == 6.0);
+        CHECK (a.valueOf ("Cutoff", " 1 kHz ") == a.valueOf ("Cutoff", "1000 Hz"));
+        // Display at a unit's edge, and two-way shares adding up to 100.
+        CHECK (a.text ("Cutoff", a.valueOf ("Cutoff", "999.97 Hz")) == "1.00 kHz");
+        CHECK (a.text ("EG1 Decay", a.valueOf ("EG1 Decay", "999.8 ms")) == "1.00 s");
+        CHECK (a.text ("Filter Mode", 0.59) == "LP 41 / BP 59" && a.text ("Blend", 0.004) == "VCW");
+        CHECK (a.text ("VCO Seq 1 Amt", 0.979) == "99 %");
+    }
+}
+
 void demos (const std::string& folder)
 {
     // The factory presets, 8 s each at 120 BPM: each loaded by its key, written out to listen to.
@@ -1175,6 +1556,10 @@ int main (int argc, char** argv)
     testPitchAndQuantizer();
     testClock2();
     testRouting();
+    testClockChanges();
+    testOffsetsThroughLoops();
+    testMidBlockLoop();
+    testHostEdges();
     testExtremes();
     demos (argv[2]);
     entry->deinit();

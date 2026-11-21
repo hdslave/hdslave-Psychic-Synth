@@ -10,7 +10,7 @@
 #include <strings.h>
 
 #ifndef PSYCHIC_VERSION
-#define PSYCHIC_VERSION "0.1.0"
+#define PSYCHIC_VERSION "0.1.1"
 #endif
 
 namespace psychic
@@ -144,13 +144,19 @@ constexpr uint32_t seqStateIds[] = {
 };
 constexpr uint32_t seqStateCount = sizeof (seqStateIds) / sizeof (seqStateIds[0]);
 static_assert (seqStateCount <= 32, "one bit each in a mask");
-constexpr int seqStateIndex (uint32_t id)
+struct SeqStateIndex
 {
-    for (uint32_t i = 0; i < seqStateCount; ++i)
-        if (seqStateIds[i] == id)
-            return (int) i;
-    return -1;
-}
+    int8_t of[ParamId::count];
+    constexpr SeqStateIndex() : of()
+    {
+        for (uint32_t i = 0; i < ParamId::count; ++i)
+            of[i] = -1;
+        for (uint32_t i = 0; i < seqStateCount; ++i)
+            of[seqStateIds[i]] = (int8_t) i;
+    }
+};
+inline constexpr SeqStateIndex seqStateIndexOf {};
+inline int seqStateIndex (uint32_t id) { return id < ParamId::count ? seqStateIndexOf.of[id] : -1; }
 
 using P = Param;
 #define CONT(id, name, module, lo, hi, def, unit) P { ParamId::id, name, module, lo, hi, def, Kind::continuous, Unit::unit, nullptr }
@@ -286,20 +292,22 @@ inline void formatBits (int bits, char* text, uint32_t size)
 inline void formatParam (const Param& p, float v, char* text, uint32_t size)
 {
     v = clampParam (p, v);
+    // (Each unit up to where its rounding would read as the next: 999.96 Hz is "1.00 kHz", not "1000.0 Hz".)
     auto time = [&] (float s) {
-        if (s < 1.0f) std::snprintf (text, size, "%.0f ms", s * 1000.0f);
+        if (s < 0.9995f) std::snprintf (text, size, "%.0f ms", s * 1000.0f);
         else std::snprintf (text, size, "%.2f s", s);
     };
     auto hz = [&] (float f) {
-        if (f < 10.0f) std::snprintf (text, size, "%.2f Hz", f);
-        else if (f < 1000.0f) std::snprintf (text, size, "%.1f Hz", f);
+        if (f < 9.995f) std::snprintf (text, size, "%.2f Hz", f);
+        else if (f < 999.95f) std::snprintf (text, size, "%.1f Hz", f);
         else std::snprintf (text, size, "%.2f kHz", f / 1000.0f);
     };
-    // A two-way knob: its ends by name, between them the share of the right end.
+    // A two-way knob: its ends by name, between them the two shares (adding up to 100).
     auto twoWay = [&] (const char* left, const char* right, const char* format) {
-        if (v <= 0.005f) std::snprintf (text, size, "%s", left);
-        else if (v >= 0.995f) std::snprintf (text, size, "%s", right);
-        else std::snprintf (text, size, format, (1.0f - v) * 100.0f, v * 100.0f);
+        const int share = (int) std::lround (v * 100.0f);
+        if (share <= 0) std::snprintf (text, size, "%s", left);
+        else if (share >= 100) std::snprintf (text, size, "%s", right);
+        else std::snprintf (text, size, format, 100 - share, share);
     };
     switch (p.unit)
     {
@@ -309,13 +317,13 @@ inline void formatParam (const Param& p, float v, char* text, uint32_t size)
         case Unit::decay: time (decaySeconds (v)); break;
         case Unit::percent: std::snprintf (text, size, "%.0f %%", v * 100.0f); break;
         case Unit::bipolar: std::snprintf (text, size, "%+.0f %%", v * 100.0f); break;
-        case Unit::qtzAmount:
+        case Unit::qtzAmount: // below QTZ never "100 %" (which reads back as QTZ)
             if (v >= qtzFrom) std::snprintf (text, size, "QTZ");
-            else std::snprintf (text, size, "%.0f %%", seqAmtScale (v) * 100.0f);
+            else std::snprintf (text, size, "%.0f %%", std::floor (seqAmtScale (v) * 100.0f));
             break;
-        case Unit::filterMode: twoWay ("LP", "BP", "LP %.0f / BP %.0f"); break;
-        case Unit::blend: twoWay ("VCW", "VCF", "VCW %.0f / VCF %.0f"); break;
-        case Unit::trigMix: twoWay ("Seq 1", "Seq 2", "%.0f / %.0f"); break;
+        case Unit::filterMode: twoWay ("LP", "BP", "LP %d / BP %d"); break;
+        case Unit::blend: twoWay ("VCW", "VCF", "VCW %d / VCF %d"); break;
+        case Unit::trigMix: twoWay ("Seq 1", "Seq 2", "%d / %d"); break;
         case Unit::cvRange: std::snprintf (text, size, "+-%.1f oct", v * seqOctaves); break;
         case Unit::volts: std::snprintf (text, size, "%+.2f V", v * 5.0f); break;
         case Unit::bits: formatBits ((int) v, text, size); break;
@@ -326,16 +334,29 @@ inline void formatParam (const Param& p, float v, char* text, uint32_t size)
     }
 }
 
-// Reads text as formatParam writes it (units optional); a choice by its name or its number; a bit pattern as its
-// eight LEDs or as a number.
-inline bool parseParam (const Param& p, const char* text, float& v)
+// Reads text as formatParam writes it (units optional, spaces around it ignored); a choice by its name or its number;
+// a bit pattern as its eight LEDs or as a number. Anything else (and "nan", "inf") is refused.
+inline bool parseParam (const Param& p, const char* raw, float& v)
 {
+    char trimmed[64];
+    while (*raw == ' ' || *raw == '\t')
+        ++raw;
+    std::snprintf (trimmed, sizeof (trimmed), "%s", raw);
+    for (size_t n = std::strlen (trimmed); n > 0 && (trimmed[n - 1] == ' ' || trimmed[n - 1] == '\t'); --n)
+        trimmed[n - 1] = 0;
+    const char* text = trimmed;
     if (p.kind == Kind::choice)
     {
         const int n = (int) (p.max - p.min) + 1;
         for (int i = 0; i < n; ++i)
             if (strcasecmp (text, p.choices[i]) == 0)
                 return v = (float) i, true;
+        // Or its number, and nothing more.
+        char* end = nullptr;
+        const long i = std::strtol (text, &end, 10);
+        if (end == text || *end != 0 || i < 0 || i >= n)
+            return false;
+        return v = (float) i, true;
     }
     if (p.kind == Kind::button)
     {
@@ -366,7 +387,7 @@ inline bool parseParam (const Param& p, const char* text, float& v)
                 ++at;
             char* end = nullptr;
             const double share = std::strtod (at, &end);
-            if (end == at)
+            if (end == at || ! std::isfinite (share))
                 return false;
             return v = clampParam (p, (float) (share / 100.0)), true;
         }
@@ -375,7 +396,7 @@ inline bool parseParam (const Param& p, const char* text, float& v)
         at += 2;
     char* end = nullptr;
     double x = std::strtod (at, &end);
-    if (end == at)
+    if (end == at || ! std::isfinite (x))
         return false;
     while (*end == ' ')
         ++end;

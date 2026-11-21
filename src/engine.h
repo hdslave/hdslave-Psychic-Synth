@@ -200,7 +200,7 @@ struct Decimator
         constexpr int len = 2 * half;
         odd[at] = odd[at + len] = b;
         even[evenAt] = a;
-        quiet = (a == 0.0f && b == 0.0f) ? quiet + 1 : 0;
+        quiet = (a == 0.0f && b == 0.0f) ? std::min (quiet + 1, 2 * half + 1) : 0; // held at silent(): never overflows
         const float* w = odd + at + 1;
         float sum = 0.0f;
         for (int i = 0; i < half; ++i)
@@ -241,13 +241,15 @@ constexpr double clockSlack = 1.0e-3;
 class Engine
 {
 public:
-    void prepare (double hostRate, uint32_t)
+    void prepare (double hostRate)
     {
         rate = hostRate;
         inner = (float) (2.0 * hostRate);
         invInner = 1.0f / inner;
         decimator.design();
         dcPole = (float) std::exp (-2.0 * M_PI * 8.0 / inner); // the folder's DC blocker: 8 Hz
+        attackRate = attackOf (attackSeconds);
+        rated = true; // the rate moved: the decays and the noise's split again
         reset();
     }
 
@@ -264,11 +266,12 @@ public:
         decimator.clear();
         noise = 0x9e3779b9u;
         tick = 0;
+        now = 0;
         playing = false;
         for (auto& c : clocks)
             c = Clock {};
         for (auto& l : lanes)
-            l.play = -1, l.held = 0.0f, l.aligned = false;
+            l.play = -1, l.offset = 0, l.held = 0.0f, l.aligned = false, l.hit = false;
         dirty = true;
         retarget();
         for (int i = 0; i < smoothed; ++i)
@@ -283,10 +286,15 @@ public:
             return;
         knob[id] = v;
         dirty = true;
+        if (id == ParamId::eg1Decay || id == ParamId::eg2Decay || id == ParamId::noiseTone)
+            rated = true;
         using namespace ParamId;
         switch (id)
         {
-            case clockDiv: clocks[0].regridWanted = clocks[1].regridWanted = true; break;
+            case clockDiv:
+                clocks[0].regridWanted = true;
+                clocks[1].regridWanted = ! ownClock2(); // Clock 2 on its own grid keeps it
+                break;
             case clock2: clocks[1].regridWanted = true; break;
             case bits1: lanes[0].bits = (uint8_t) v; break;
             case bits2: lanes[1].bits = (uint8_t) v; break;
@@ -392,9 +400,16 @@ public:
             playing = false;
             return;
         }
-        // A Play, or a place other than where the last block ended (a jump, a loop going round): line up again.
-        if (! playing || std::fabs (beats - position) > 0.5 * perFrame)
-            relocate (beats, window);
+        // A Play lines the sequences up with the song's place, from bit 1 at the top. A place other than where the last
+        // block ended by under half a step is the host's count drifting from ours (its tempo moved inside the block):
+        // the clocks carry on, so none plays twice and none is lost. Further is a jump, or a loop going round: line up
+        // again, the play heads keeping how far they are from the song's place (after a Reset, an Advance, Bit
+        // Shift 2).
+        const double moved = std::fabs (beats - position);
+        if (! playing)
+            relocate (beats, window, true);
+        else if (moved > 0.5 * perFrame && moved >= 0.5 * std::min (grid (0), grid (1)))
+            relocate (beats, window, false);
         playing = true;
         position = beats;
     }
@@ -422,18 +437,20 @@ public:
                     if (due1)
                     {
                         ++clocks[0].last;
+                        clocks[0].at = (int64_t) now;
                         if (go)
                         {
-                            hit1 = step (0, clocks[0].last);
+                            hit1 = lanes[0].hit = step (0, clocks[0].last);
                             if (! own)
-                                hit2 = step (1, clocks[0].last);
+                                hit2 = lanes[1].hit = step (1, clocks[0].last);
                         }
                     }
                     if (due2)
                     {
                         ++clocks[1].last;
+                        clocks[1].at = (int64_t) now;
                         if (go)
-                            hit2 = step (1, clocks[1].last);
+                            hit2 = lanes[1].hit = step (1, clocks[1].last);
                     }
                     if (go)
                     {
@@ -448,6 +465,7 @@ public:
                     run = (uint32_t) untilStep;
             }
             sound (left, right, run);
+            now += run;
             if (playing)
                 position += run * perFrame;
             left += run;
@@ -466,12 +484,15 @@ private:
         int length = 8;
         int ahead = 0;      // the write head, this many bits after the play head
         int play = -1;      // the bit the play head is on (in its ring); -1: before bit 1 (after a Reset)
+        int offset = 0;     // the play head's place less the song's (its clock count), round its ring
         float held = 0.0f;  // the CV of the last on bit the play head met: the sequencer's CV output
         bool aligned = false; // false after a Play or a jump: the next clock places the play head by the song
+        bool hit = false;   // its last step was on (it triggered)
     };
     struct Clock
     {
         int64_t last = -1; // the number (from the song's top) of the clock last played
+        int64_t at = -(int64_t (1) << 40); // the frame (`now`) it played on
         bool regridWanted = false;
     };
 
@@ -575,16 +596,16 @@ private:
         }
     }
 
-    // The play head on to its next bit (the first after a Reset); an on bit there gives the CV output its value.
-    // True if that bit is on.
+    // The play head on to its next bit (the first after a Reset; round the ring if it shrank under the head), or to
+    // the song's place plus its offset; an on bit there gives the CV output its value. True if that bit is on.
     bool moveOn (int s, bool placeBySong, int64_t clock = 0)
     {
         Lane& l = lanes[s];
         const int n = ringLength (s);
         if (placeBySong)
-            l.play = (int) (((clock % n) + n) % n);
+            l.play = (int) ((((clock + l.offset) % n) + n) % n);
         else
-            l.play = l.play + 1 >= n ? 0 : l.play + 1;
+            l.play = (l.play + 1) % n;
         int lane, bit;
         cellOf (s, l.play, lane, bit);
         if (! ((lanes[lane].bits >> bit) & 1))
@@ -601,6 +622,8 @@ private:
         Lane& l = lanes[s];
         const bool hit = moveOn (s, ! l.aligned, clock);
         l.aligned = true;
+        const int n = ringLength (s);
+        l.offset = (int) ((((int64_t) l.play - clock) % n + n) % n);
         const float corrupt = knob[s == 0 ? ParamId::corrupt1 : ParamId::corrupt2];
         if (corrupt > 0.0f)
         {
@@ -645,27 +668,58 @@ private:
         return beats / g + 1.0e-9 < clockBeat (c, b) / g ? b - 1 : b; // between the grid line and the late clock
     }
 
-    void relocate (double beats, double window)
+    // `fresh`: a Play, which starts the play heads at the song's place itself (offsets cleared).
+    void relocate (double beats, double window, bool fresh)
     {
+        bool stood[2] = {};
+        int64_t b[2] = {};
         for (int c = 0; c < 2; ++c)
         {
-            const int64_t b = clockAtOrBefore (c, beats);
-            // Just past a step's start (less than a block: a loop's wrap inside the last block, a Play landing a hair
+            b[c] = clockAtOrBefore (c, beats);
+            const double late = (beats - clockBeat (c, b[c])) / perFrame; // frames since the host's clock b began
+            // A jump whose clock b began on the very frame a clock played here: a loop gone round inside a block (a
+            // host such as Melodee tells of it only at the next block, so the clocks ran on past the loop's end; its
+            // end is its start). That clock was b, and b does not play again.
+            stood[c] = ! fresh && std::fabs ((double) ((int64_t) now - clocks[c].at) - late) <= 2.0;
+            // Otherwise, just past a step's start (less than a block: a wrap seen early enough, a Play landing a hair
             // late): that step plays at once; further in, the next step is the first.
-            const double late = (beats - clockBeat (c, b)) / perFrame;
-            clocks[c].last = b - (late < window ? 1 : 0);
+            clocks[c].last = stood[c] ? b[c] : b[c] - (late < window ? 1 : 0);
             clocks[c].regridWanted = false;
         }
         position = beats;
-        if (knob[ParamId::run] >= 0.5f) // stopped by Run, the sequences hold their places through the host's moves
-            for (auto& l : lanes)
-                l.aligned = false;
+        if (knob[ParamId::run] < 0.5f) // stopped by Run, the sequences hold their places through the host's moves
+            return;
+        for (auto& l : lanes)
+            l.aligned = false, l.offset = fresh ? 0 : l.offset;
+        // The sequences on a clock that stood for b go to where b puts them, as if b had played there: the CV is b's
+        // bit's; and if the step played then was silent and b's bit is on, b sounds now (a block late at most).
+        bool hit[2] = {};
+        for (int s = 0; s < 2; ++s)
+        {
+            const int c = s == 1 && ownClock2() ? 1 : 0;
+            if (! stood[c])
+                continue;
+            const bool on = moveOn (s, true, b[c]);
+            lanes[s].aligned = true;
+            hit[s] = on && ! lanes[s].hit;
+            lanes[s].hit |= on;
+        }
+        if (stood[0] || stood[1])
+        {
+            stepped();
+            const float mix = knob[ParamId::egTrigMix];
+            strikeLevel ((hit[0] ? 1.0f - mix : 0.0f) + (hit[1] ? mix : 0.0f));
+        }
     }
 
-    // A grid changed: count clocks on the new one from here, without a burst of them.
+    // A grid changed: count clocks on the new one from here, without a burst of them. A clock on this very frame has
+    // not played (a frame's events come before its clocks), so it still does.
     void regrid (int c)
     {
-        clocks[c].last = clockAtOrBefore (c, position);
+        int64_t b = clockAtOrBefore (c, position);
+        if ((position - clockBeat (c, b)) / perFrame < clockSlack)
+            --b;
+        clocks[c].last = b;
         clocks[c].regridWanted = false;
     }
 
@@ -732,7 +786,6 @@ private:
         // between them moves up with the knob, 300 Hz to 9.6 kHz.
         target[noiseLowShare] = std::min (1.0f, 2.0f * (1.0f - knob[noiseTone]));
         target[noiseHighShare] = std::min (1.0f, 2.0f * knob[noiseTone]);
-        noisePole = (float) std::exp (-2.0 * M_PI * 300.0 * std::exp2 (5.0 * knob[noiseTone]) / inner);
         // The wavefolder: Fold (and SEQ 1 at its amount, in its +-5 V as a turn each way), Bias, EG1's amount.
         target[foldAt] = knob[fold] + seq1 * (1.0f / seqOctaves) * knob[vcwSeq1Amt];
         target[biasAt] = knob[bias];
@@ -749,9 +802,17 @@ private:
 
         order = (int) knob[ParamId::order];
         droning = knob[drone] >= 0.5f;
-        eg1.decay = decayOf (knob[eg1Decay]);
-        eg2.decay = decayOf (knob[eg2Decay]);
-        eg1.attack = eg2.attack = attackOf (attackSeconds);
+        // The rates (exp and pow): only when their knobs or the sample rate moved, so turning another knob stays cheap.
+        if (rated)
+        {
+            decay1 = decayOf (knob[eg1Decay]);
+            decay2 = decayOf (knob[eg2Decay]);
+            noisePole = (float) std::exp (-2.0 * M_PI * 300.0 * std::exp2 (5.0 * knob[noiseTone]) / inner);
+            rated = false;
+        }
+        eg1.decay = decay1;
+        eg2.decay = decay2;
+        eg1.attack = eg2.attack = attackRate;
         dirty = false;
         moving = true;
     }
@@ -761,15 +822,18 @@ private:
         uint32_t i = 0;
         while (i < frames)
         {
-            if (eg1.idle() && eg2.idle() && ! droning && decimator.silent())
+            if (eg1.idle() && eg2.idle() && decimator.silent())
             {
-                // Nothing sounds and nothing is running down: the rest of this run is silence. The knobs need no
-                // easing while nothing plays (a step lands on them), so they are taken as they are.
+                // Nothing is running down. The knobs need no easing while nothing plays (a step lands on them), so they
+                // are taken as they are; then, unless Drone holds the VCAs open, the rest of this run is silence.
                 if (dirty)
                     retarget();
                 for (int k = 0; k < smoothed; ++k)
                     smooth[k] = target[k];
                 moving = false;
+            }
+            if (eg1.idle() && eg2.idle() && ! droning && decimator.silent())
+            {
                 const uint32_t n = frames - i;
                 std::memset (left + i, 0, sizeof (float) * n);
                 if (right)
@@ -889,6 +953,8 @@ private:
     float knob[ParamId::count] {};
     float target[smoothed] {}, smooth[smoothed] {};
     float vcoPhase = 0.0f, noiseLow = 0.0f, noisePole = 0.0f, dcIn = 0.0f, dcOut = 0.0f, dcPole = 0.0f;
+    float decay1 = 0.0f, decay2 = 0.0f, attackRate = 1.0f; // the EGs' rates, worked out when `rated`
+    bool rated = true;
     float transpose = 0.0f;
     int order = 0;
     bool droning = false, chained = false;
@@ -900,6 +966,7 @@ private:
     float buffer[seqStateCount] {};
     bool bufferFull = false, bufferSaved = false;
     uint32_t tick = 0, lastBlock = 0, noise = 0x9e3779b9u;
+    uint64_t now = 0; // frames rendered since prepare(): when each clock played
     Envelope eg1, eg2;
     Triangle mod;
     Svf svf;
