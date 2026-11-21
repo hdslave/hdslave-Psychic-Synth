@@ -16,6 +16,7 @@ In hdslaveOS, open Psychic in Melodee's Edit or Stage plug-in page. Each frame i
 The upper row is sequencer A, the lower row B. An open gate lights up the ribbon, and the height of its centre shows
 the step voltage. Select **Save** to print the pattern on the left. Pink underlines on the live print and magenta dots
 on the punch card mark cells whose gate or voltage differs. **Recall** restores the saved sequencer settings.
+During playback, the ring around the eye spins once every four quarter notes at the project tempo.
 
 ![Psychic's Contact Sheet and cell editor in Melodee](docs/contact-sheet.png)
 

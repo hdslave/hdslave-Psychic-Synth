@@ -1,5 +1,6 @@
 #include "screen.h"
 #include "ui/masthead.h"
+#include "ui/orbit.h"
 
 namespace psychic
 {
@@ -131,7 +132,58 @@ void punch (Raster& r, int x, int y, bool on, bool enabled)
     else
         r.frame (x, y, 8, 11, outline);
 }
+
+// Each frame replaces a few runs of pixels in the original eye tile. Frames can be
+// visited in any order, including after a loop, a seek, or reopening the page.
+void paintOrbit (Ink* dest, int stride, int frame)
+{
+    for (int y = 0; y < orbit::height; ++y)
+    {
+        const auto* base = masthead::pixels + (orbit::y + y) * masthead::width + orbit::x;
+        for (int x = 0; x < orbit::width; ++x)
+            dest[y * stride + x] = masthead::palette[base[x]];
+    }
+    const auto* run = orbit::spans + orbit::offsets[frame];
+    const auto* end = orbit::spans + orbit::offsets[frame+1];
+    while (run < end)
+    {
+        int pixel = run[0] | (int (run[1]) << 8);
+        const int length = run[2];
+        run += 3;
+        for (int n = 0; n < length; ++n, ++pixel)
+            dest[(pixel / orbit::width) * stride + pixel % orbit::width] = masthead::palette[*run++];
+    }
+}
 } // namespace
+
+void ScreenFeed::setTransport (double beats, double bpm)
+{
+    const double turns = beats / 4.0;
+    const auto phase = uint32_t ((turns - std::floor (turns)) * ticksPerTurn);
+    const auto milliBpm = uint64_t (std::lround (bpm * 1000.0));
+    orbitClock.store (milliBpm * ticksPerTurn + phase, std::memory_order_relaxed);
+}
+
+int Screen::orbitFrame (const melodee_screen_canvas_t& canvas)
+{
+    if (!canvas.playing)
+    {
+        spinning = false;
+        return 0;
+    }
+    const auto clock = feed.orbitClock.load (std::memory_order_relaxed);
+    if (!spinning || clock != lastOrbitClock || canvas.now_ms < orbitAnchorMs)
+    {
+        lastOrbitClock = clock;
+        orbitAnchorMs = canvas.now_ms;
+    }
+    spinning = true;
+    const double phase = double (clock % ScreenFeed::ticksPerTurn) / ScreenFeed::ticksPerTurn;
+    const double bpm = double (clock / ScreenFeed::ticksPerTurn) / 1000.0;
+    // The screen clock carries the rotation between audio blocks and through the host's idle gate.
+    const double turns = phase + double (canvas.now_ms - orbitAnchorMs) * bpm / 240000.0;
+    return int ((turns - std::floor (turns)) * orbit::frames);
+}
 
 void Screen::setMemory (const std::array<float, seqStateCount>& savedValues, bool full)
 {
@@ -239,6 +291,8 @@ void Screen::header (Raster& r) const
     for (int y = 0; y < masthead::height; ++y)
         for (int x = 0; x < masthead::width; ++x)
             r.px[y * r.w + x] = masthead::palette[masthead::pixels[y * masthead::width + x]];
+
+    if (ringFrame) paintOrbit (r.px + orbit::y*r.w + orbit::x, r.w, ringFrame);
 
     constexpr int tab = 218;
     r.text (tab + 3, 6, inspector ? "CELL EDITOR" : group ? groups[group] : "CONTACT SHEET", light);
@@ -548,8 +602,14 @@ bool Screen::paint (const melodee_screen_canvas_t& c)
     const bool content = whole || changed || params;
     const bool helpChanged = shift != c.shift;
     shift = c.shift;
+    const int nextFrame = orbitFrame (c);
+    const bool turned = nextFrame != ringFrame;
+    ringFrame = nextFrame;
     bool drew = false;
     if (content) drew |= picture.region<320, headerH> (c.pixels, c.stride, whole, 0, 0, [&] (Raster& r) { header (r); });
+    else if (turned)
+        drew |= picture.region<orbit::width, orbit::height> (c.pixels, c.stride, false, orbit::x, orbit::y,
+            [&](Raster& r) { paintOrbit (r.px, r.w, ringFrame); });
     if (!group)
     {
         if (content || memoryChanged)

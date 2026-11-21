@@ -1533,6 +1533,54 @@ void testScreen()
     CHECK (!paint (true));
     canvas.stride = stride;
     CHECK ((knobs() == std::vector<clap_id> {a.id ("Corrupt 1"),a.id ("Corrupt 2"),a.id ("Clock Div")}));
+    // The four-beat spin follows song time. Its repaint clock keeps ticking even when
+    // a silent instrument gets no audio callbacks. Use the cell editor to isolate the eye.
+    CHECK (key (MELODEE_SCREEN_PUSH));
+    a.setup ({{"Run", 0}});
+    auto position = [&](double bpm, double beats) {
+        std::vector<float> left, right;
+        a.render (128,128,left,right,[&](uint64_t) { return Transport {true,bpm,beats}; });
+    };
+    position (120,0);
+    canvas.playing = true;
+    CHECK (paint (true));
+    const auto rest = pixels;
+    const int asked = paints;
+    CHECK (!paint() && paints > asked);
+    canvas.now_ms += 500;
+    CHECK (paint());
+    const auto quarter = pixels;
+    int changedPixels = 0;
+    bool onlyEye = true;
+    for (int y=0; y<218; ++y)
+        for (int x=0; x<stride; ++x)
+            if (pixels[y*stride+x] != rest[y*stride+x])
+            {
+                ++changedPixels;
+                onlyEye &= x>=154 && x<218 && y>=2 && y<37;
+            }
+    CHECK (changedPixels > 60 && onlyEye);
+    CHECK (paint (true) && pixels == quarter);
+    position (60,0);
+    CHECK (paint() && pixels == rest);
+    canvas.now_ms += 500;
+    CHECK (paint() && pixels != rest && pixels != quarter);
+    const auto halfBeat = pixels;
+    canvas.now_ms += 500;
+    CHECK (paint() && pixels == quarter);
+    position (120,-3.5);
+    CHECK (paint() && pixels == halfBeat);
+    position (120,4);
+    CHECK (paint() && pixels == rest);
+    position (120,2);
+    CHECK (paint() && pixels != rest);
+    canvas.playing = false;
+    CHECK (paint() && pixels == rest);
+    const int stoppedPaints = paints;
+    canvas.now_ms += 1000;
+    CHECK (!paint() && paints == stoppedPaints);
+    CHECK (key (MELODEE_SCREEN_NUDGE,-1) && a.loadPreset ("default"));
+    a.setup ({});
     const auto emptyState = saveState (a);
     CHECK (key (MELODEE_SCREEN_PUSH));
     CHECK ((knobs() == std::vector<clap_id> {a.id ("Seq 1 CV 1"),a.id ("Length 1"),a.id ("Corrupt 1")}));

@@ -635,6 +635,7 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
         const bool placed = (t->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE) != 0;
         const double bpm = (t->flags & CLAP_TRANSPORT_HAS_TEMPO) && t->tempo > 0.0 ? std::min (std::max (t->tempo, 1.0), 1000.0) : 120.0;
         const double beats = placed ? (double) t->song_pos_beats / (double) CLAP_BEATTIME_FACTOR : p.engine.ownPosition();
+        if (p.hostScreen) p.feed.setTransport (beats, bpm);
         p.engine.transport (playing, beats, bpm, frames);
     }
     else

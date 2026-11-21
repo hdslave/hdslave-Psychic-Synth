@@ -22,6 +22,11 @@ struct ScreenFeed
         return v == noEdit ? values[i].load (std::memory_order_relaxed) : v;
     }
 
+    // The audio thread publishes tempo and quarter-note position as one coherent observation.
+    static constexpr uint32_t ticksPerTurn = 1u << 24;
+    std::atomic<uint64_t> orbitClock {120000ull * ticksPerTurn};
+    void setTransport (double beats, double bpm);
+
     // Five bits per physical cell: play A, write A, play B, write B. Cell 16 means no play head yet.
     std::atomic<uint32_t> heads{16u | (16u << 10) | (8u << 15)};
     std::atomic<uint32_t> hits[2]{};
@@ -44,7 +49,7 @@ class Screen
     void knobs (clap_id ids[3]) const;
     bool paint (const melodee_screen_canvas_t& canvas);
 
-    bool animating () const { return group == 0 && !inspector && (flash[0] || flash[1]); }
+    bool animating () const { return spinning || (group == 0 && !inspector && (flash[0] || flash[1])); }
 
   private:
     static constexpr const char* groups[] = {"Contact sheet", "Sequencer", "Seq 1",   "Seq 1/CV", "Seq 2",
@@ -59,6 +64,9 @@ class Screen
     uint64_t hitAt[2]{};
     int group = 0, rows = 0, cursors[std::size (groups)]{}, selection = 0, flash[2]{};
     bool first = true, changed = true, memoryChanged = true, haveMemory = false;
+    uint64_t lastOrbitClock = 0, orbitAnchorMs = 0;
+    int ringFrame = 0;
+    bool spinning = false;
     bool inspector = false, editing = false, shift = false;
     melodee_screen_knob_t pots[3]{};
 
@@ -70,6 +78,7 @@ class Screen
 
     int head (int lane, bool write) const { return int ((heads >> (10 * lane + (write ? 5 : 0))) & 31); }
 
+    int orbitFrame (const melodee_screen_canvas_t& canvas);
     bool cellChanged (int cell) const;
     void selectGroup (int n);
     void header (hdui::Raster& r) const;
