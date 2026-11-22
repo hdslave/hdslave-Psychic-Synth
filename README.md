@@ -1,14 +1,12 @@
-# Psychic
+# hdslave Psychic
 
-A generative analog-style synthesizer as a CLAP plug-in, built for the Akai MPC Sample running Melodee (64-bit ARM
-Linux, Cortex-A55). Hosts list it as **hdslave Psychic** (id `com.hdslave.psychic`). It follows the front panel and
-normalled signal flow of the Moog Labyrinth, without the patch bay: a sine VCO and a triangle Mod VCO with
-through-zero FM, ring mod and noise into an overdriving mixer, a wavefolder and a 2-pole state-variable filter (in
-parallel or one into the other), two VCAs and a Blend, played by two corruptible 8-bit sequencers. Four patch-bay
-moves come as controls of their own: a second clock, the Mod VCO into Fold and into Cutoff, and the VCAs held open.
+**A generative analog-style dual-sequencer synthesizer (Labyrinth panel & flow) as a CLAP plug-in for the Akai MPC Sample.**
 
-Its sequencers are clocked by the host: steps fall on the host's beat grid while it plays, stop when it stops, and
-start again from the song's place when it starts or jumps.
+![Psychic Contact Sheet animated screen running in hdslaveOS](docs/psychic-screen.gif)
+
+Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melodee-sample) / [hdslaveOS](https://github.com/hdslave/hdslaveOS) (64-bit ARM Linux, Cortex-A55). Hosts list it as **hdslave Psychic** (id `com.hdslave.psychic`). It follows the front panel and normalled signal flow of the Moog Labyrinth (without the patch bay): a sine VCO and triangle Mod VCO with through-zero FM, ring mod, and noise feeding an overdriving mixer, a wavefolder, and a 2-pole state-variable filter (parallel or series), two VCAs, and Blend — driven by two corruptible 8-bit sequencers that can chain into a 16-step ring. Four classic patch-bay moves are built right in: a second clock, Mod VCO into Fold and Cutoff, and VCA drone hold.
+
+Its sequencers lock tightly to the host transport and beat grid. Under **hdslaveOS**, Psychic draws its animated **Contact Sheet** screen comparing saved and live steps side by side with direct per-cell gate and voltage editing.
 
 ## Contact Sheet on the MPC Sample
 
