@@ -51,3 +51,7 @@ order-1 914e370d3e107f8c
 order-2 9b416477b1063c1c
 melodee-loop-polyrhythm 997d3c08cfac1584
 melodee-loop-chain-melody 83baf95495ca2304
+pads-playing 8272ae11cbe83ed8
+pads-chained 1f3b406a12856330
+pads-stopped eec26b3b0e210fc8
+pads-run-stop ba2275364405f760

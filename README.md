@@ -8,6 +8,9 @@ Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melo
 
 Its sequencers lock tightly to the host transport and beat grid. Under **hdslaveOS**, Psychic draws its animated **Contact Sheet** screen comparing saved and live steps side by side with direct per-cell gate and voltage editing.
 
+Version 0.2.0. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
+(`clap_check`), but nobody has played it on the device yet.
+
 ## Contact Sheet on the MPC Sample
 
 In hdslaveOS, open Psychic in Melodee's Edit or Stage plug-in page. Each frame in the two film strips is a step.
@@ -109,7 +112,7 @@ The public CLAP parameter names and their panel equivalents are listed below.
 | EG1 Decay, EG2 Decay | EG1 DECAY, EG2 (VCA) DECAY | 10 ms – 8 s (time to −60 dB); decay-only, about 1 ms to rise |
 | EG Trig Mix | EG TRIG MIX | Seq 1 … 50 / 50 … Seq 2 |
 | Clock Div | TEMPO (replaced) | 1/2 … 1/64 of the host's beat, with triplets |
-| Run | RUN/STOP | Stop / Run |
+| Run | RUN/STOP | Stop / Run. Run: pads 1–16 play the steps; Stop: the pads play notes (see MIDI notes and pads) |
 | Quantize | the quantizer's 16 modes (button combinations on the panel) | Unquantized, Chromatic, Major, Pentatonic, Melodic Minor, Harmonic Minor, Diminished 6th, Whole Tone, Hirajoshi, 7 Sus 4, Major 7th, Major 13th, Minor 7th, Minor 11th, Hang Drum, Quads (Minor 3rds) |
 | Trigger | TRIGGER | fires EG1 and EG2 at full |
 | Advance | ADVANCE | moves both play heads on a bit without playing (only while the sequences are not running) |
@@ -130,13 +133,27 @@ The public CLAP parameter names and their panel equivalents are listed below.
 | Drone | patch: a voltage into both VCA CV inputs | Off / On: the VCAs held open |
 | Seq 1 CV 1–8, Seq 2 CV 1–8 | the bits' CVs | ±5.00 V |
 
-### MIDI notes
+### MIDI notes and pads
 
-As on the panel, a note transposes the quantized sequences. Each note moves the scale's root by its distance from
-middle C (60), and the transposition holds until the next note. Unquantized, notes do not transpose. While the
-sequences are not running (the host stopped, or Run off), a note also fires both envelopes, at the note's velocity,
-so the stopped Psychic plays like a mono synth. A note on Play's own frame counts as running (it transposes); one on
-Stop's frame plays.
+- **Run on (the sequencer on): pads 1–16 play the steps**, whether the host plays or not. On an hdslaveOS plug-in
+  track at its default octave and key, pads A01–A16 send notes 36–51: pads 1–8 (notes 36–43) are SEQ 1's bits 1–8,
+  and pads 9–16 (notes 44–51) are SEQ 2's bits 1–8. With Chain Seq on, that is the ring's 16 bits in order.
+- A pad plays its bit as the sequencer would: that sequencer's CV output takes the bit's CV, through CV Range, the
+  quantizer and the current transposition, and both envelopes fire at the pad's velocity. It does this whether the bit
+  is on or off, and past the Length too. Chained, both CV outputs take it, as when both play heads are on that bit.
+- A pad moves nothing else: not the play or write heads, the bits, their CVs or the transposition, and the host is
+  told of nothing. The bit's CV holds until that sequencer's next on bit plays.
+- Two pads in one block (Melodee sends them on one frame): for each sequencer the louder pad's CV wins (on a tie, the
+  later one), and the envelopes take the louder peak. A pad of each sequence gives each its own CV, as a step with
+  both bits on does. A pad on Play's frame sounds; if the step Play lands on is on, its CV replaces the pad's at once.
+- Every other note does what notes did before. As on the panel, it transposes the quantized sequences: each note moves
+  the scale's root by its distance from middle C (60), and the transposition holds until the next note. While the
+  sequences are not running (the host stopped), it also fires both envelopes at the note's velocity. A note on Play's
+  own frame counts as running (it only transposes); one on Stop's frame plays.
+- **Run off (the sequencer off): the pads play notes.** Every note, the pads too, transposes as above and also fires
+  both envelopes at its velocity, so Psychic plays like a mono synth.
+- Unquantized, notes do not transpose (they still fire the envelopes where they would). Pads still play their bits'
+  CVs, unquantized.
 
 ## Presets
 
@@ -189,6 +206,9 @@ these, so they are chosen to fit what it does document:
   from 0 at 12 o'clock to 50 % at full.
 - The sequencer's CV holds from one on bit to the next. Off bits leave it where it is.
 - MIDI notes transpose from middle C. A note's velocity sets its envelopes' peak.
+- The step pads, which the panel does not have: notes 36–51, hdslaveOS's pads A01–A16 at its default octave and key.
+  A pad fires the envelopes at its own velocity, not through EG Trig Mix, so SEQ 2's bits sound even with the mix at
+  Seq 1. Chained, a pad's bit goes to both CV outputs.
 - Depths: EG1 ±8 octaves on pitch and cutoff (its 8 V at 1 V/octave), through-zero FM index 4, about four folds
   at full Fold, a Q of 10 at full Resonance, Mod VCO 0.16 Hz at its lowest, EG decays to 8 s.
 - The scales behind the names Hirajoshi (1 2 b3 5 b6) and Hang Drum (1 2 b3 5 b6 b7). Major 13th and Minor 11th
@@ -258,16 +278,23 @@ The tests load the plug-in through the CLAP API and check:
 - Corrupt: fully left it loops at the same pitches, at 45 % it changes notes but not the rhythm, and at full it flips
   bits, the same each time;
 - pitch: the VCO and Mod VCO to 0.2 %, seven quantizer modes, scaled Seq Amt, CV Range, and MIDI transposing (and not
-  when Unquantized);
+  when Unquantized; with Run off, notes 36–51 too);
+- the step pads: each of the 16, apart and chained, sounds to the bit as the sequencer playing its bit (stopped with
+  the bit on and off, playing with a transposition, on Play's frame for bit 1); pitches measured (quantized,
+  transposed, Unquantized, chained, Run off); a pad's CV held until that sequencer's next on bit; the play heads
+  unmoved (playing, and stopped with Advance); nothing heard back, Bits and CVs unchanged; two pads on one frame (the
+  louder wins, on a tie the later; one of each sequence as a step with both bits on; one pad twice plays once); on,
+  on, off; a choke and a CC 120/123 storm; a pad on Play's frame with its step on and off; Run switched on or off on
+  the pad's frame; the same output at every block size;
 - Clock 2's triplets against Clock 1, with their meeting accents;
 - routing: Order and Blend (each path the same to the bit where it should be), Fold clean at 0, Noise Tone and Drone;
 - finite, bounded output at 60 random and extreme settings, buttons pressed.
 
-`tests/fingerprint.cpp` then renders 53 fixed scenarios and hashes every output sample's bits, and the values the
+`tests/fingerprint.cpp` then renders 57 fixed scenarios and hashes every output sample's bits, and the values the
 plug-in tells the host it changed, against `tests/fingerprint.txt`. The scenarios: each preset, the bench's patches,
 24 random patches with the buttons, MIDI and knobs moving, other block sizes and rates, stop and jumps, Corrupt
-across its turn, chained moves and the buffer, Clock 2 with Swing, notes, each Order, and two-bar loops as Melodee
-plays them. Work meant to keep the
+across its turn, chained moves and the buffer, Clock 2 with Swing, notes, step pads (playing, chained, stopped, and
+with Run off as the keyboard), each Order, and two-bar loops as Melodee plays them. Work meant to keep the
 sound, such as a speed-up, must leave every hash as it is. A change meant to change the sound updates them with
 `make fingerprint-update` (run inside the build image). The hashes hold for Melodee's build image and these compiler
 flags.

@@ -272,7 +272,7 @@ public:
         for (auto& c : clocks)
             c = Clock {};
         for (auto& l : lanes)
-            l.play = -1, l.offset = 0, l.held = 0.0f, l.aligned = false, l.hit = false;
+            l.play = -1, l.offset = 0, l.held = 0.0f, l.aligned = false, l.hit = false, l.previewAt = ~uint64_t (0), l.previewLevel = 0.0f;
         dirty = true;
         retarget();
         for (int i = 0; i < smoothed; ++i)
@@ -350,10 +350,16 @@ public:
         }
     }
 
-    // A MIDI note: transposes the quantized sequences (the note's distance from middle C); while the sequencers are
-    // not running it also triggers both envelopes, at its velocity.
+    // A MIDI note. With Run on (the host playing or not), notes 36-51 are step pads (preview()). Every other note, and
+    // every note with Run off: transposes the quantized sequences (the note's distance from middle C); while the
+    // sequencers are not running it also triggers both envelopes, at its velocity.
     void note (int key, float velocity)
     {
+        if (knob[ParamId::run] >= 0.5f && key >= firstStepNote && key < firstStepNote + 16)
+        {
+            preview (key - firstStepNote, velocity);
+            return;
+        }
         transpose = (float) (key - transposeNote);
         dirty = true;
         retarget();
@@ -503,6 +509,8 @@ private:
         float held = 0.0f;  // the CV of the last on bit the play head met: the sequencer's CV output
         bool aligned = false; // false after a Play or a jump: the next clock places the play head by the song
         bool hit = false;   // its last step was on (it triggered)
+        uint64_t previewAt = ~uint64_t (0); // the frame (`now`) a step pad last gave its CV output a bit's CV
+        float previewLevel = 0.0f;          // and that pad's velocity
     };
     struct Clock
     {
@@ -753,6 +761,29 @@ private:
             return;
         eg1.trigger (level);
         eg2.trigger (level);
+    }
+
+    // A step pad (0-15: SEQ 1's bits 1-8, then SEQ 2's): the bit's CV goes to the CV output of the sequencer that
+    // plays it, as a step there would put it (through CV Range, the quantizer and the transposition, landing at once),
+    // whether the bit is on or off and whatever the Lengths. Chained, it is the ring's bit, and both play heads run
+    // round the ring: both outputs take it. Both envelopes fire at the pad's velocity. Nothing else moves: no play or
+    // write head, bit, CV or transposition, nothing the host must hear. The CV holds until that sequencer's next on
+    // bit. Two pads on one frame giving one output a CV: the louder pad's wins (on a tie, the later); the envelopes
+    // keep the louder peak themselves.
+    void preview (int pad, float velocity)
+    {
+        const int lane = pad >> 3, bit = pad & 7;
+        for (int s = 0; s < 2; ++s)
+        {
+            Lane& l = lanes[s];
+            if ((s != lane && ! chained) || (l.previewAt == now && velocity < l.previewLevel))
+                continue;
+            l.previewAt = now;
+            l.previewLevel = velocity;
+            l.held = lanes[lane].cv[bit];
+        }
+        stepped();
+        strikeLevel (velocity);
     }
 
     // A step moved the sequences: their CVs land on the voice at once (no glide into a step).

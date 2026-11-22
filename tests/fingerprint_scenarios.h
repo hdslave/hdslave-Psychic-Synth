@@ -153,6 +153,28 @@ std::vector<Scenario> scenarios()
         };
         list.push_back (s);
     }
+    // 0.2.0: with Run on, notes 36-51 are step pads (SEQ 1's bits 1-8, then SEQ 2's): pads while it plays (on steps'
+    // frames and between them, two on one frame, one pad twice on a frame, a re-press), chained, and stopped, with
+    // notes outside the pads among them; and the same notes with Run off, the keyboard as before (as 0.1.3 hashes it).
+    const std::vector<std::pair<uint64_t, int>> pads { { 3000, 38 }, { 12000, 44 }, { 12000, 41 }, { 30001, 60 }, { 36000, 51 },
+                                                       { 47000, 36 }, { 47000, 36 }, { 60000, 35 }, { 72000, 49 }, { 84000, 43 },
+                                                       { 99999, 52 }, { 120000, 46 }, { 120000, 39 }, { 150000, 40 }, { 170000, 40 } };
+    for (const char* key : { "pads-playing", "pads-chained", "pads-stopped", "pads-run-stop" })
+    {
+        const std::string name = key;
+        Scenario s;
+        s.name = name;
+        s.preset = name == "pads-chained" ? "chain-melody" : "fold-bass";
+        s.seconds = 4.0;
+        for (const auto& [frame, key] : pads)
+            s.events.push_back ({ frame, Event::noteOn, "", (double) key });
+        s.events.push_back ({ 172000, Event::noteOff, "", 40.0 });
+        if (name == "pads-stopped")
+            s.transport = [] (uint64_t, double, double) -> std::pair<bool, double> { return { false, 0.0 }; };
+        if (name == "pads-run-stop")
+            s.values = { { "Run", 0.0 } };
+        list.push_back (s);
+    }
     return list;
 }
 } // namespace
