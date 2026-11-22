@@ -710,12 +710,13 @@ private:
         // bit's; and if the step played then was silent and b's bit is on, b sounds now (a block late at most). It
         // sounds as b does, with every sequence whose bit there is on: one that already struck on that clock (its
         // old bit on too) still has its share in b's level, or b would come in softer than it plays elsewhere.
-        bool on[2] = {}, newlyOn = false;
+        bool on[2] = {}, struck[2] = {}, newlyOn = false;
         for (int s = 0; s < 2; ++s)
         {
             const int c = s == 1 && ownClock2() ? 1 : 0;
             if (! stood[c])
                 continue;
+            struck[s] = lanes[s].hit; // it sounded on the clock that played here
             on[s] = moveOn (s, true, b[c]);
             lanes[s].aligned = true;
             newlyOn |= on[s] && ! lanes[s].hit;
@@ -724,9 +725,13 @@ private:
         if (stood[0] || stood[1])
         {
             stepped();
+            // b strikes only if it is louder than what that clock already struck: a sequence newly on that EG Trig
+            // Mix gives no share (Mix at 0 or 1) adds nothing, so the downbeat does not strike twice.
             const float mix = knob[ParamId::egTrigMix];
-            if (newlyOn)
-                strikeLevel ((on[0] ? 1.0f - mix : 0.0f) + (on[1] ? mix : 0.0f));
+            const float level = (on[0] ? 1.0f - mix : 0.0f) + (on[1] ? mix : 0.0f);
+            const float already = (struck[0] ? 1.0f - mix : 0.0f) + (struck[1] ? mix : 0.0f);
+            if (newlyOn && level > already)
+                strikeLevel (level);
         }
     }
 

@@ -1410,7 +1410,9 @@ void testMidBlockLoop()
     // the count ran on to is SEQ 2's alone (half): it struck on the loop's last frame, and SEQ 1's bit sounds a block
     // late. The downbeat is still full, as on the first pass and as a host that tells of the wrap on its own frame
     // (8-frame blocks) plays it. Apart: SEQ 1 a ring of 5, SEQ 2 of 4, bit 1 on in each. Chained: one ring of 5, its
-    // bits 1, 2 and 5 on, SEQ 2's head a bit ahead (Bit Shift 2).
+    // bits 1, 2 and 5 on, SEQ 2's head a bit ahead (Bit Shift 2). At EG Trig Mix 1 only SEQ 2 counts: it struck at
+    // full on the loop's last frame, so SEQ 1's late bit adds nothing and the downbeat strikes once, not again.
+    for (float mix : { 0.5f, 0.0f, 1.0f })
     for (bool chained : { false, true })
     {
         auto downbeats = [&] (uint32_t block, const std::function<Transport (uint64_t)>& transport) {
@@ -1420,7 +1422,7 @@ void testMidBlockLoop()
             p.push_back ({ "Length 1", chained ? 3 : 5 });
             p.push_back ({ "Length 2", chained ? 2 : 4 });
             p.push_back ({ "Chain Seq", chained ? 1.0 : 0.0 });
-            p.push_back ({ "EG Trig Mix", 0.5 });
+            p.push_back ({ "EG Trig Mix", mix });
             p.push_back ({ "Clock Div", a.valueOf ("Clock Div", "1/4") });
             p.push_back ({ "VCO Freq", 0.75 });
             p.push_back ({ "Volume", 0.35 });
