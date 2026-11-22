@@ -276,6 +276,6 @@ flags.
 
 ## Install
 
-Copy `build/Psychic.clap` to `Melodee/Plugins/hdslave Psychic/hdslave Psychic.clap` on the card (or the staged
-card's folder), then pick it on an empty track: Stage, Plugin, hdslave Psychic. It needs only libc and libm (glibc
+Copy `build/Psychic.clap` to `Melodee/Plugins/hdslave/hdslave Psychic.clap` on the card (or the staged
+card's folder), then pick it on an empty track: Stage, Plugin, hdslave, hdslave Psychic. It needs only libc and libm (glibc
 2.35 or older).
