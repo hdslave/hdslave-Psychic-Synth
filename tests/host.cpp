@@ -7,6 +7,7 @@
 // Writes demo renders as WAV files into the output folder.
 //   host Psychic.clap OUT_FOLDER
 #include "wav.h"
+#include "../src/engine.h" // the Decimator alone: its impulse delay is measured below (testLatencyTail)
 #include "../src/melodee_screen.h"
 
 #include <clap/clap.h>
@@ -37,6 +38,8 @@ const clap_plugin_factory* factory = nullptr;
 // The host side: log, and the two a preset load tells (counted); the plug-in must cope without the rest.
 int paints = 0, wakes = 0, flushes = 0;
 int rescans = 0, presetsLoaded = 0, presetErrors = 0;
+int tailNotices = 0;
+bool offerTail = true; // false: a host without clap.tail (testTailNotices)
 const void* hostExtension (const clap_host*, const char* id)
 {
     static const clap_host_melodee_screen screen { [] (const clap_host*) { ++paints; } };
@@ -51,6 +54,8 @@ const void* hostExtension (const clap_host*, const char* id)
     if (std::strcmp (id, CLAP_EXT_LOG) == 0) return &log;
     if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &params;
     if (std::strcmp (id, CLAP_EXT_PRESET_LOAD) == 0) return &presetLoad;
+    static const clap_host_tail tailHost { [] (const clap_host*) { ++tailNotices; } };
+    if (offerTail && std::strcmp (id, CLAP_EXT_TAIL) == 0) return &tailHost;
     return nullptr;
 }
 
@@ -659,17 +664,39 @@ void testHardening()
     }
 }
 
+// One inner phase's delay through the decimator, in host frames: the energy centroid of its impulse response,
+// measured on the Decimator compiled from src/engine.h. (The host binary builds it without the plug-in's
+// compiler flags; the delay in whole frames is set by the FIR's tap count, not by the last bit of a tap, and a
+// plug-in-level impulse is impossible: Psychic has no audio input.)
+double decimatorDelay (bool oddPhase)
+{
+    psychic::Decimator d;
+    d.design();
+    double num = 0.0, den = 0.0;
+    for (int i = 0; i < 64; ++i)
+    {
+        const float y = d.push (i == 0 && ! oddPhase ? 1.0f : 0.0f, i == 0 && oddPhase ? 1.0f : 0.0f);
+        num += (double) i * (double) y * (double) y, den += (double) y * (double) y;
+    }
+    return den > 0.0 ? num / den : -1.0;
+}
+
 // Reported latency and tail, against renders of the same instances. Latency is the decimator's 47-tap FIR group
-// delay (its centre tap 11 host frames back, odd inner samples centred half a frame later: measured by impulse,
-// 11 frames at every rate). The tail is EG2 ringing to exact zero; with Drone it never ends.
+// delay, measured by impulse above (the even inner phase centres exactly on the reported frame, the odd phase
+// half a frame later), the same at every rate. The tail is EG2 ringing to exact zero; with Drone it never ends.
 void testLatencyTail()
 {
     std::vector<float> l, r;
+    const double evenDelay = decimatorDelay (false), oddDelay = decimatorDelay (true);
     for (double rate : { 44100.0, 48000.0, 96000.0 })
     {
         Instance a (rate);
         const auto* latency = static_cast<const clap_plugin_latency*> (a.plugin->get_extension (a.plugin, CLAP_EXT_LATENCY));
-        CHECK (latency != nullptr && latency->get (a.plugin) == 11);
+        CHECK (latency != nullptr);
+        if (latency == nullptr)
+            continue;
+        const double reported = (double) latency->get (a.plugin);
+        CHECK (std::fabs (evenDelay - reported) < 0.01 && std::fabs (oddDelay - (reported + 0.5)) < 0.01);
     }
     for (double eg2 : { 0.0, 0.45, 1.0 })
     {
@@ -695,6 +722,48 @@ void testLatencyTail()
         const auto* tail = static_cast<const clap_plugin_tail*> (a.plugin->get_extension (a.plugin, CLAP_EXT_TAIL));
         CHECK (tail != nullptr && tail->get (a.plugin) >= 0x7fffffffu); // at least INT32_MAX: infinite
     }
+}
+
+// A caching host re-reads the tail only when told it changed: EG2 Decay and Drone (the two values tailGet
+// reads) tell it, by process event, by flush and by a preset load (whose notice waits for the next block:
+// clap_host_tail::changed is an audio-thread call). An unrelated knob, or the same value again, does not. A
+// host that does not offer clap.tail still works.
+void testTailNotices()
+{
+    std::vector<float> l, r;
+    Instance a;
+    const int base = tailNotices;
+    a.setup ({ { "Volume", 0.4 } });
+    CHECK (tailNotices == base);
+    a.setup ({ { "EG2 Decay", 0.8 } });
+    CHECK (tailNotices == base + 1);
+    a.setup ({ { "EG2 Decay", 0.8 } }); // no change: no notice
+    CHECK (tailNotices == base + 1);
+    {
+        Events e;
+        e.param (0, a.id ("EG2 Decay"), 0.6);
+        OutEvents out;
+        a.params->flush (a.plugin, &e.in, &out.out);
+        a.render (128, 128, l, r, stopped); // a flush's notice lands with the next block
+        CHECK (tailNotices == base + 2);
+    }
+    a.setup ({ { "Drone", 1.0 } });
+    CHECK (tailNotices == base + 3);
+    CHECK (a.loadPreset ("default")); // EG2 Decay back to 0.45, Drone off: one notice, on the next block
+    CHECK (tailNotices == base + 3);
+    a.render (128, 128, l, r, stopped);
+    CHECK (tailNotices == base + 4);
+
+    offerTail = false;
+    {
+        Instance b;
+        b.setup ({ { "EG2 Decay", 0.9 }, { "Drone", 1.0 } });
+        b.render (128, 128, l, r, stopped);
+        const auto* tail = static_cast<const clap_plugin_tail*> (b.plugin->get_extension (b.plugin, CLAP_EXT_TAIL));
+        CHECK (tail != nullptr && tail->get (b.plugin) >= 0x7fffffffu);
+    }
+    offerTail = true;
+    CHECK (tailNotices == base + 4);
 }
 
 // The factory presets: listed by preset discovery as a host's browser reads them, loaded by key through
@@ -2508,6 +2577,7 @@ int main (int argc, char** argv)
     testSettleOnLoad();
     testHardening();
     testLatencyTail();
+    testTailNotices();
     testPresets();
     testTiming();
     testStopRestartJump();

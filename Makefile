@@ -26,7 +26,7 @@ $(OUT)/Psychic.clap: $(SOURCES) $(HEADERS) src/exports.map Makefile
 	@mkdir -p $(OUT)
 	$(CXX) $(CXXFLAGS) $(SOURCES) $(LDFLAGS) -o $@
 
-$(OUT)/host: tests/host.cpp tests/wav.h src/melodee_screen.h Makefile
+$(OUT)/host: tests/host.cpp tests/wav.h src/melodee_screen.h src/engine.h src/params.h Makefile
 	@mkdir -p $(OUT)
 	$(CXX) -std=c++17 -O2 $(WARN) -Ithird_party/clap/include tests/host.cpp -ldl -o $@
 

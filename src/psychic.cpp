@@ -50,6 +50,8 @@ struct Plugin
     std::atomic<uint32_t> loads { 0 };
     const clap_host_melodee_screen* hostScreen = nullptr;
     const clap_host_params* hostParams = nullptr;
+    const clap_host_tail* hostTail = nullptr;
+    std::atomic<bool> tailPending { false }; // Drone or EG2 Decay moved: tell the host from the next block
     std::atomic<uint32_t> bufferRevision { 0 };
     uint32_t paintedRevision = 0;
     ScreenFeed feed;
@@ -92,6 +94,20 @@ void unlock (Plugin& p) { p.exchange.store (false, std::memory_order_release); }
 void requestPaint (Plugin& p)
 {
     if (p.hostScreen && p.hostScreen->request_paint) p.hostScreen->request_paint (p.host);
+}
+
+// Drone and EG2 Decay are what tailGet reads: a caching host re-reads the tail only when told it changed.
+// That notice is an audio-thread call, so a change from any thread (an event, a page edit, a state or preset
+// load) only sets this; process sends it.
+void markTail (Plugin& p, uint32_t id, float before, float after)
+{
+    if ((id == ParamId::eg2Decay || id == ParamId::drone) && before != after)
+        p.tailPending.store (true, std::memory_order_release);
+}
+void sendTail (Plugin& p) // the audio thread (process)
+{
+    if (p.tailPending.exchange (false, std::memory_order_acquire) && p.hostTail && p.hostTail->changed)
+        p.hostTail->changed (p.host);
 }
 
 // Publish clock positions and actual hits once per audio block. The page never reads the engine.
@@ -215,6 +231,7 @@ void handle (Plugin& p, const clap_event_header* e, const clap_output_events* ou
                 break;
             }
             p.audioValuesMoved = true;
+            markTail (p, info.id, p.values[index].load (std::memory_order_relaxed), value);
             p.values[index].store (value, std::memory_order_relaxed);
             p.engine.set (info.id, value);
             break;
@@ -275,6 +292,7 @@ void takePageCommands (Plugin& p, const clap_output_events* out, bool allowPress
         {
             const int i = paramIndex (edit.id);
             auto& pending = p.edits[i];
+            markTail (p, edit.id, p.values[i].load (std::memory_order_relaxed), edit.value);
             p.engine.set (edit.id, edit.value);
             p.values[i].store (edit.value, std::memory_order_relaxed);
             if (--pending.queued == 0) p.feed.preview[i].store (ScreenFeed::noEdit, std::memory_order_release);
@@ -381,6 +399,10 @@ bool readAll (const clap_istream* s, void* data, uint64_t size)
 // processing, the engine takes them now; otherwise at the next block.
 void loadAll (Plugin& p, const float* values, const float* buffer = nullptr, bool full = false)
 {
+    markTail (p, ParamId::eg2Decay, p.values[paramIndex (ParamId::eg2Decay)].load (std::memory_order_relaxed),
+              values[paramIndex (ParamId::eg2Decay)]);
+    markTail (p, ParamId::drone, p.values[paramIndex (ParamId::drone)].load (std::memory_order_relaxed),
+              values[paramIndex (ParamId::drone)]);
     lockMain (p);
     for (uint32_t i = 0; i < paramCount; ++i)
     {
@@ -545,6 +567,7 @@ bool pluginInit (const clap_plugin* plugin)
     auto& p = of (plugin);
     p.hostScreen = static_cast<const clap_host_melodee_screen*> (p.host->get_extension (p.host, CLAP_EXT_MELODEE_SCREEN_HOST));
     p.hostParams = static_cast<const clap_host_params*> (p.host->get_extension (p.host, CLAP_EXT_PARAMS));
+    p.hostTail = static_cast<const clap_host_tail*> (p.host->get_extension (p.host, CLAP_EXT_TAIL)); // may be absent
     for (uint32_t i = 0; i < paramCount; ++i)
     {
         p.feed.preview[i].store (ScreenFeed::noEdit, std::memory_order_relaxed);
@@ -686,6 +709,7 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     // What the engine changed itself, heard by the host at the block's end.
     publish (p, process->out_events, last, since);
     publishScreen (p);
+    sendTail (p);
     p.audioFrames.fetch_add (frames, std::memory_order_relaxed);
     // Never "sleep": the sequencers must hear the next Play, which is no event. (Melodee puts an idle instrument to
     // sleep itself, and the engine skips its own work while the VCAs are closed.)
@@ -756,7 +780,8 @@ const clap_plugin_latency latencyExtension { latencyGet };
 
 // Tail: EG2 ringing from a full trigger to exact zero (the envelope is zeroed at 1.6e-5, so 1.5986 times its
 // knob's -60 dB time, plus the 1 ms attack, 1 ms more and the decimator's 11 frames; host tests measure the
-// last nonzero frame against it). With Drone the VCAs never close: no end.
+// last nonzero frame against it). With Drone the VCAs never close: no end. When Drone or EG2 Decay moves, the
+// host is told (markTail/sendTail), for hosts that cache this value.
 uint32_t tailGet (const clap_plugin* plugin)
 {
     const auto& p = of (plugin);
