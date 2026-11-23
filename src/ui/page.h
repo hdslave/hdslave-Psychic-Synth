@@ -92,6 +92,6 @@ public:
 
 private:
     static constexpr int capacity = 320 * 158;
-    Ink prior[width * height], scratch[capacity];
+    Ink prior[width * height] {}, scratch[capacity] {};
 };
 } // namespace hdui

@@ -8,10 +8,10 @@ preset-noise-perc 6c3469af7f9b99eb
 bench-worst bcea3911051c7c24
 bench-typical 73ea480887bf207c
 random-0 37efc495cff42b2e
-random-1 2faaa6e2f0477ac4
+random-1 008e409a579e0544
 random-2 cc6a9a121a712e72
 random-3 ac9e5b6e15d09d8b
-random-4 f6b28f4c72b0474f
+random-4 b7527948f0b5c48f
 random-5 5991c4972942e4ab
 random-6 06c182822bd0bbf6
 random-7 0c0d87a7ead627a5
@@ -20,9 +20,9 @@ random-9 6bb3ec55f23e6753
 random-10 4c0c0cc79bd5c9ec
 random-11 61cddf9f214973d6
 random-12 4c2cafb0a023a52a
-random-13 2cd2ec241fc846f4
+random-13 da43170327cc0d60
 random-14 580a547735618f00
-random-15 202afab985eb4f78
+random-15 3a309a66da75e954
 random-16 c04000720c680cf8
 random-17 8ff39136a2072fee
 random-18 1122c719fa158804

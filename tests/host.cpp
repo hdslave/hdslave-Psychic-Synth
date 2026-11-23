@@ -406,6 +406,7 @@ void testParameters()
     CHECK (a.text ("Filter Mode", 0.0) == "LP" && a.text ("Filter Mode", 1.0) == "BP");
     CHECK (a.text ("EG Trig Mix", 0.0) == "Seq 1" && a.text ("EG Trig Mix", 1.0) == "Seq 2" && a.text ("EG Trig Mix", 0.5) == "50 / 50");
     CHECK (a.text ("Quantize", 0.0) == "Unquantized" && a.text ("Quantize", 15.0) == "Quads (Minor 3rds)");
+    CHECK (a.text ("Quantize", 14.0) == "Minor 6-Note" && a.valueOf ("Quantize", "Minor 6-Note") == 14.0);
     CHECK (a.text ("VCO Freq", 0.0) == "20.0 Hz" && a.text ("VCO Freq", 1.0) == "5.12 kHz");
     CHECK (a.text ("Mod VCO Freq", 0.0) == "0.16 Hz" && a.text ("Mod VCO Freq", 1.0) == "1.31 kHz");
     CHECK (a.text ("Seq 1 CV 1", 1.0) == "+5.00 V" && a.text ("CV Range 1", 0.2) == "+-1.0 oct");
@@ -455,6 +456,10 @@ void testState()
     CHECK (! loadState (b, junk));
     std::vector<uint8_t> cut (saved.begin(), saved.begin() + 40);
     CHECK (! loadState (b, cut));
+    // A state from a newer version is refused too (its layout is not this one's to guess at).
+    std::vector<uint8_t> future = saved;
+    future[4] = 2; // the version word after the tag
+    CHECK (! loadState (b, future));
     // A state without the buffer (the values alone) loads, its buffer empty.
     std::vector<uint8_t> valuesOnly (saved.begin(), saved.end() - (4 + 8 + 24 * 8));
     Instance c;
@@ -498,6 +503,198 @@ void testState()
     CHECK (g.value ("Bits 1") == 0x81);
     g.render (256, 128, l1, r1, from0);
     CHECK (g.value ("Bits 1") == 0x81);
+}
+
+// The host's silence (hdslaveOS sends CC 120 and CC 123 at 0 on every channel, which arrive as NOTE_CHOKEs in the
+// CLAP dialect and as the CCs themselves in the MIDI one) stops what sounds, Drone included, within a block; the
+// next step, Trigger or note strikes again. A note off still lets a hit ring out, and CC 121 has nothing to reset.
+void testPanic()
+{
+    std::vector<float> l, r, ref;
+    auto silentFrom = [] (const std::vector<float>& x, size_t from) {
+        for (size_t i = from; i < x.size(); ++i)
+            if (x[i] != 0.0f)
+                return false;
+        return true;
+    };
+    auto soundsIn = [] (const std::vector<float>& x, size_t from, size_t to) {
+        for (size_t i = from; i < to && i < x.size(); ++i)
+            if (std::fabs (x[i]) > 0.005f)
+                return true;
+        return false;
+    };
+    // Drone held open, stopped: each silencer at frame 2400 ends it; a note off and CC 121/40 change nothing.
+    constexpr uint64_t at2400 = 2400;
+    auto droneRun = [&] (int silencer, std::vector<float>& out) {
+        Instance a;
+        a.setup ({ { "Drone", 1.0 } });
+        a.render (4800, 128, out, r, stopped, [&] (uint64_t at, uint32_t n, Events& e) {
+            if (at2400 < at || at2400 >= at + n)
+                return;
+            const uint32_t t = (uint32_t) (at2400 - at);
+            if (silencer == 1) e.note (t, CLAP_EVENT_NOTE_CHOKE, 60, 0.0);
+            else if (silencer == 2) e.note (t, CLAP_EVENT_NOTE_CHOKE, 99, 0.0); // a key never played: one voice
+            else if (silencer == 3) e.midi (t, 0xb0, 120, 0);
+            else if (silencer == 4) e.midi (t, 0xb3, 123, 0);
+            else if (silencer == 5) e.note (t, CLAP_EVENT_NOTE_OFF, 60, 0.0);
+            else if (silencer == 6) { e.midi (t, 0xb0, 121, 0); e.midi (t, 0xb0, 40, 100); }
+            else if (silencer == 7) e.midi (t, 0xb0, 120, 64); // channel mode is value 0 only
+        });
+    };
+    droneRun (0, ref);
+    CHECK (soundsIn (ref, 3000, 4800));
+    for (int s : { 1, 2, 3, 4 })
+    {
+        droneRun (s, l);
+        CHECK (silentFrom (l, 2400 + 128));
+    }
+    for (int s : { 5, 6, 7 })
+    {
+        droneRun (s, l);
+        CHECK (l == ref);
+    }
+    // The longest EG2 tail (8 s to -60 dB), struck stopped: a choke a second in silences it.
+    {
+        Instance a;
+        a.setup ({ { "EG1 Decay", 1.0 }, { "EG2 Decay", 1.0 } });
+        a.render (96000, 128, l, r, stopped, [&] (uint64_t at, uint32_t n, Events& e) {
+            if (at == 0) e.note (0, CLAP_EVENT_NOTE_ON, 60, 1.0);
+            if (48000 >= at && 48000 < at + n) e.note ((uint32_t) (48000 - at), CLAP_EVENT_NOTE_CHOKE, 60, 0.0);
+        });
+        CHECK (soundsIn (l, 47000, 48000) && silentFrom (l, 48000 + 128));
+    }
+    // Playing: a choke between steps silences the tail, and the next step strikes again.
+    {
+        Instance a;
+        auto p = clickPatch (a);
+        p.push_back ({ "EG2 Decay", 1.0 });
+        a.setup (p);
+        a.render (48000, 128, l, r, from0, [&] (uint64_t at, uint32_t n, Events& e) {
+            if (6000 >= at && 6000 < at + n) e.midi ((uint32_t) (6000 - at), 0xb0, 120, 0);
+        });
+        CHECK (soundsIn (l, 0, 6000) && silentFrom (std::vector<float> (l.begin(), l.begin() + 12000), 6000 + 128)
+               && soundsIn (l, 12000, 18000));
+    }
+    // Same frame, in the order sent: note then choke is silent; choke then note sounds.
+    {
+        auto both = [&] (bool chokeFirst, std::vector<float>& out) {
+            Instance a;
+            a.setup ({ { "EG2 Decay", 1.0 } });
+            a.render (9600, 128, out, r, stopped, [&] (uint64_t at, uint32_t, Events& e) {
+                if (at != 1280)
+                    return;
+                if (chokeFirst) e.note (0, CLAP_EVENT_NOTE_CHOKE, 60, 0.0), e.note (0, CLAP_EVENT_NOTE_ON, 60, 1.0);
+                else e.note (0, CLAP_EVENT_NOTE_ON, 60, 1.0), e.note (0, CLAP_EVENT_NOTE_CHOKE, 60, 0.0);
+            });
+        };
+        both (false, l);
+        CHECK (silentFrom (l, 1280 + 128));
+        both (true, l);
+        CHECK (soundsIn (l, 1280, 9600));
+    }
+}
+
+// Play landing part-way through a step: within the Play window (128 frames, the device's block) that step plays at
+// once; further in, the next step is the first. The same at every block size, to the bit.
+void testMidGridPlay()
+{
+    std::vector<float> l, r, at128;
+    auto run = [&] (double startFrames, uint32_t block, std::vector<float>& out) {
+        Instance a;
+        a.setup (clickPatch (a));
+        const double startBeats = startFrames / 24000.0; // 120 BPM at 48 kHz: 24,000 frames a beat, 12,000 a 1/8 step
+        a.render (48000, block, out, r, [startBeats] (uint64_t at) { return playingFrom (startBeats, 120.0, 48000.0, at); });
+    };
+    // 100 frames past the second step's start: it plays at once, then on the grid.
+    run (12100.0, 128, at128);
+    CHECK ((onsets (at128) == std::vector<long> { 0, 11900, 23900, 35900, 47900 }));
+    for (uint32_t block : { 1u, 37u, 4096u })
+    {
+        run (12100.0, block, l);
+        CHECK (l == at128);
+    }
+    // 2,000 frames in: that step is gone; the next is the first, whatever the block.
+    run (14000.0, 128, at128);
+    CHECK ((onsets (at128) == std::vector<long> { 10000, 22000, 34000, 46000 }));
+    for (uint32_t block : { 1u, 37u, 4096u })
+    {
+        run (14000.0, block, l);
+        CHECK (l == at128);
+    }
+}
+
+// A state loaded while the plug-in rings: its values are in place at the next block (the glides settle), not eased
+// to over the next millisecond. Here the loaded Volume is 0, so past the decimator's flush the output is exact 0.
+void testSettleOnLoad()
+{
+    std::vector<float> l, r;
+    Instance quiet;
+    quiet.setup ({ { "Drone", 1.0 }, { "Volume", 0.0 } });
+    const auto state = saveState (quiet);
+    Instance a;
+    a.setup ({ { "Drone", 1.0 } });
+    a.render (4800, 128, l, r, stopped);
+    bool ringing = false;
+    for (size_t i = 3800; i < l.size(); ++i)
+        ringing |= std::fabs (l[i]) > 0.005f;
+    CHECK (ringing);
+    CHECK (loadState (a, state));
+    a.render (2048, 128, l, r, stopped);
+    bool settled = true;
+    for (size_t i = 64; i < l.size(); ++i)
+        settled &= l[i] == 0.0f;
+    CHECK (settled);
+}
+
+// Activation refuses a rate that is no rate (the engine divides by it).
+void testHardening()
+{
+    const auto* d = factory->get_plugin_descriptor (factory, 0);
+    for (double bad : { 0.0, -48000.0, HUGE_VAL, (double) NAN })
+    {
+        const clap_plugin* plugin = factory->create_plugin (factory, &host, d->id);
+        CHECK (plugin != nullptr && plugin->init (plugin));
+        CHECK (! plugin->activate (plugin, bad, 1, 128));
+        plugin->destroy (plugin);
+    }
+}
+
+// Reported latency and tail, against renders of the same instances. Latency is the decimator's 47-tap FIR group
+// delay (its centre tap 11 host frames back, odd inner samples centred half a frame later: measured by impulse,
+// 11 frames at every rate). The tail is EG2 ringing to exact zero; with Drone it never ends.
+void testLatencyTail()
+{
+    std::vector<float> l, r;
+    for (double rate : { 44100.0, 48000.0, 96000.0 })
+    {
+        Instance a (rate);
+        const auto* latency = static_cast<const clap_plugin_latency*> (a.plugin->get_extension (a.plugin, CLAP_EXT_LATENCY));
+        CHECK (latency != nullptr && latency->get (a.plugin) == 11);
+    }
+    for (double eg2 : { 0.0, 0.45, 1.0 })
+    {
+        Instance a;
+        a.setup ({ { "EG2 Decay", eg2 }, { "VCO Level", 0.5 }, { "Mod VCO Level", 0.0 } });
+        const auto* tail = static_cast<const clap_plugin_tail*> (a.plugin->get_extension (a.plugin, CLAP_EXT_TAIL));
+        CHECK (tail != nullptr);
+        if (tail == nullptr)
+            continue;
+        const uint32_t reported = tail->get (a.plugin);
+        a.render (720000, 1024, l, r, stopped, [&] (uint64_t at, uint32_t, Events& e) {
+            if (at == 0) e.note (0, CLAP_EVENT_NOTE_ON, 60, 1.0);
+        });
+        long last = -1;
+        for (long i = 0; i < (long) l.size(); ++i)
+            if (l[(size_t) i] != 0.0f)
+                last = i;
+        CHECK (last >= 0 && reported >= (uint32_t) (last + 1) && reported <= (uint32_t) (last + 1) + 2400);
+    }
+    {
+        Instance a;
+        a.setup ({ { "Drone", 1.0 } });
+        const auto* tail = static_cast<const clap_plugin_tail*> (a.plugin->get_extension (a.plugin, CLAP_EXT_TAIL));
+        CHECK (tail != nullptr && tail->get (a.plugin) >= 0x7fffffffu); // at least INT32_MAX: infinite
+    }
 }
 
 // The factory presets: listed by preset discovery as a host's browser reads them, loaded by key through
@@ -1800,18 +1997,17 @@ void testStepPads()
         sound ({ { 1280, 40 } }, first);
         sound ({ { 1280, 40 }, { 3840, 40 }, { 10240, 40, 0.0, CLAP_EVENT_NOTE_OFF } }, both);
         CHECK (std::equal (first.begin(), first.begin() + 3840, both.begin()) && energy (both, 3840, 6000) > 4.0 * energy (first, 3840, 6000));
-        // A choke of the pad and a CC 120/123 storm on every channel (Melodee silencing), and a CC numbered like a
-        // pad: none is a pad press, none changes what rings.
+        // A note off of the pad, CC 121 and a CC numbered like a pad: none is a pad press, none changes what rings.
+        // (A choke and CC 120/123 do silence it: testPanic.)
         Instance a;
         a.setup (patch (a, 0, 0, 0.5, false));
         a.render (16000, 128, both, r, stopped, [&] (uint64_t at, uint32_t n, Events& e) {
             hits ({ { 1280, 40 } }) (at, n, e);
             if (at != 2560)
                 return;
-            e.note (0, CLAP_EVENT_NOTE_CHOKE, 40, 0.0);
             e.note (0, CLAP_EVENT_NOTE_OFF, 40, 0.0);
             for (uint8_t ch = 0; ch < 16; ++ch)
-                e.midi (0, (uint8_t) (0xb0 | ch), 120, 0), e.midi (0, (uint8_t) (0xb0 | ch), 123, 0);
+                e.midi (0, (uint8_t) (0xb0 | ch), 121, 0);
             e.midi (0, 0xb0, 40, 100);
         });
         CHECK (both == first);
@@ -2195,15 +2391,16 @@ void testScreen()
     a.setup ({});
     CHECK (key (MELODEE_SCREEN_NUDGE) && key (MELODEE_SCREEN_WHEEL,3));
     CHECK (knobs()[0] == CLAP_INVALID_ID);
-    // Trigger asks the host to wake up. Its timestamp survives later presses.
+    // Trigger asks the host to wake up. A press queued while the host slept (no audio ran) still fires on waking:
+    // its age is counted in frames rendered, not wall time, so the sleep below does not expire it.
     wake = wakes;
     CHECK (key (MELODEE_SCREEN_PUSH) && wakes > wake);
     std::this_thread::sleep_for (std::chrono::milliseconds (520));
-    CHECK (key (MELODEE_SCREEN_WHEEL,1) && key (MELODEE_SCREEN_PUSH)); // fresh Advance
+    CHECK (key (MELODEE_SCREEN_WHEEL,1) && key (MELODEE_SCREEN_PUSH)); // Advance, queued behind the Trigger
     a.plugin->reset (a.plugin);
     auto stopped = [] (uint64_t) { return Transport {false,120,0}; };
     a.render (1024,128,l,r,stopped);
-    CHECK (std::all_of (l.begin(),l.end(),[] (float v){return v==0;}));
+    CHECK (std::any_of (l.begin(),l.end(),[] (float v){return std::fabs(v)>.005f;}));
     CHECK (key (MELODEE_SCREEN_WHEEL,-1) && key (MELODEE_SCREEN_PUSH));
     a.render (1024,128,l,r,stopped);
     CHECK (std::any_of (l.begin(),l.end(),[] (float v){return std::fabs(v)>.005f;}));
@@ -2229,6 +2426,34 @@ void testScreen()
             CHECK (std::find (reached.begin(),reached.end(),info.id)!=reached.end());
     }
     CHECK (!key (MELODEE_SCREEN_NUDGE));
+}
+
+// A page press queued while the host slept fires once on waking, at either device rate (its 500 ms of grace is
+// counted in frames rendered). On a fresh instance: Sequencer group, its Trigger row, push.
+void testScreenPressSleep()
+{
+    for (double rate : { 44100.0, 48000.0 })
+    {
+        Instance a (rate);
+        const auto* screen = static_cast<const clap_plugin_melodee_screen*> (a.plugin->get_extension (a.plugin, CLAP_EXT_MELODEE_SCREEN));
+        CHECK (screen != nullptr);
+        if (screen == nullptr)
+            continue;
+        auto key = [&] (uint32_t kind, int v = 1) {
+            const melodee_screen_input_t input { kind, v, false };
+            return screen->input (a.plugin, &input);
+        };
+        a.setup ({});
+        CHECK (key (MELODEE_SCREEN_NUDGE) && key (MELODEE_SCREEN_WHEEL, 3));
+        std::vector<clap_id> ids (3);
+        screen->knobs (a.plugin, ids.data());
+        CHECK (ids[0] == CLAP_INVALID_ID); // a button's row: Trigger
+        CHECK (key (MELODEE_SCREEN_PUSH));
+        std::this_thread::sleep_for (std::chrono::milliseconds (520)); // the sleeping host: no process calls
+        std::vector<float> l, r;
+        a.render (2048, 128, l, r, stopped);
+        CHECK (std::any_of (l.begin(), l.end(), [] (float v) { return std::fabs (v) > .005f; }));
+    }
 }
 
 void demos (const std::string& folder)
@@ -2278,6 +2503,11 @@ int main (int argc, char** argv)
     testDescription();
     testParameters();
     testState();
+    testPanic();
+    testMidGridPlay();
+    testSettleOnLoad();
+    testHardening();
+    testLatencyTail();
     testPresets();
     testTiming();
     testStopRestartJump();
@@ -2297,6 +2527,7 @@ int main (int argc, char** argv)
     testStepPads();
     testUnquantizedKeys();
     testScreen();
+    testScreenPressSleep();
     testExtremes();
     demos (argv[2]);
     entry->deinit();

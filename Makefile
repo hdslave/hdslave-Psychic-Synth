@@ -4,6 +4,7 @@
 #   make test       the tests against the built plug-in (tests/host.cpp) and the sound's fingerprint
 #                   (tests/fingerprint.cpp: the output to the bit, against tests/fingerprint.txt)
 #   make bench      build/bench: renders a busy pattern; tools/bench.sh counts its instructions
+#   make sanitize   the host tests against a build with AddressSanitizer and UBSan
 CXX ?= g++
 OUT := build
 WARN := -Wall -Wextra -Werror
@@ -18,7 +19,7 @@ LDFLAGS := -shared -s -static-libgcc -static-libstdc++ -Wl,--gc-sections -Wl,-z,
 SOURCES := src/psychic.cpp src/screen.cpp
 HEADERS := $(wildcard src/*.h src/ui/*.h)
 
-.PHONY: all test bench clean fingerprint-update
+.PHONY: all test bench clean fingerprint-update sanitize
 all: $(OUT)/Psychic.clap
 
 $(OUT)/Psychic.clap: $(SOURCES) $(HEADERS) src/exports.map Makefile
@@ -46,6 +47,13 @@ $(OUT)/bench: tests/bench.cpp $(SOURCES) $(HEADERS) Makefile
 	$(CXX) -std=c++17 $(OPT) $(WARN) -g -Ithird_party/clap/include -Isrc tests/bench.cpp src/screen.cpp -o $@
 
 bench: $(OUT)/bench
+
+SAN := -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer -g -O1
+sanitize: $(SOURCES) $(HEADERS) tests/host.cpp tests/wav.h src/melodee_screen.h Makefile
+	@mkdir -p $(OUT)/san
+	$(CXX) -std=c++17 $(SAN) -mcpu=cortex-a55 $(WARN) -fPIC -shared -Ithird_party/clap/include -Isrc $(SOURCES) -o $(OUT)/san/Psychic.clap
+	$(CXX) -std=c++17 $(SAN) $(WARN) -Ithird_party/clap/include tests/host.cpp -ldl -o $(OUT)/san/host
+	$(OUT)/san/host $(OUT)/san/Psychic.clap $(OUT)/san
 
 clean:
 	rm -rf $(OUT)

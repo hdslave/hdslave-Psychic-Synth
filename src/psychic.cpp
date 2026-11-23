@@ -10,7 +10,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -60,7 +59,7 @@ struct Plugin
 
     // Preserve the order of Save, Recall and individual edits even if several arrive in one block.
     // The exchange protects this queue. The audio side never waits on the main thread.
-    struct Command { Screen::Edit edit; uint64_t time; };
+    struct Command { Screen::Edit edit; uint64_t frame; };
     static constexpr unsigned pageCapacity = 128;
     Command commands[pageCapacity] {};
     unsigned written = 0, taken = 0;
@@ -69,6 +68,11 @@ struct Plugin
     std::atomic<bool> pageWaiting { false };
     Engine engine;
     bool active = false;
+    // Frames rendered since creation (the audio side counts them; a page press is stamped with the count, so its
+    // age is in rendered frames and a sleeping host, which renders none, cannot expire it). The rate, for the
+    // press's 500 ms in frames and the reported tail.
+    std::atomic<uint64_t> audioFrames { 0 };
+    std::atomic<double> sampleRate { 48000.0 };
 };
 
 Plugin& of (const clap_plugin* p) { return *static_cast<Plugin*> (p->plugin_data); }
@@ -88,11 +92,6 @@ void unlock (Plugin& p) { p.exchange.store (false, std::memory_order_release); }
 void requestPaint (Plugin& p)
 {
     if (p.hostScreen && p.hostScreen->request_paint) p.hostScreen->request_paint (p.host);
-}
-
-uint64_t steadyMs()
-{
-    return (uint64_t) std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
 // Publish clock positions and actual hits once per audio block. The page never reads the engine.
@@ -227,11 +226,21 @@ void handle (Plugin& p, const clap_event_header* e, const clap_output_events* ou
                 p.engine.note (n->key, (float) n->velocity);
             break;
         }
+        case CLAP_EVENT_NOTE_CHOKE:
+            // The host silencing (its CC 120, a choke group): the one voice stops, Drone included, whatever key
+            // the choke names (the sequencers' steps played no key). A note off is not this: a hit rings out.
+            p.engine.silence();
+            break;
         case CLAP_EVENT_MIDI:
         {
             const auto* m = reinterpret_cast<const clap_event_midi*> (e);
             if ((m->data[0] & 0xf0) == 0x90 && m->data[2] > 0)
                 p.engine.note (m->data[1] & 0x7f, (float) (m->data[2] & 0x7f) / 127.0f);
+            else if ((m->data[0] & 0xf0) == 0xb0 && (m->data[2] & 0x7f) == 0
+                     && ((m->data[1] & 0x7f) == 120 || (m->data[1] & 0x7f) == 123))
+                // All Sound Off / All Notes Off at 0, on any channel: channel mode, never a parameter change
+                // (no CC is mapped here; CC 121 has no pedal or controller of MIDI's to reset, so it does nothing).
+                p.engine.silence();
             break;
         }
         default: break;
@@ -243,7 +252,6 @@ void handle (Plugin& p, const clap_event_header* e, const clap_output_events* ou
 void takePageCommands (Plugin& p, const clap_output_events* out, bool allowPress)
 {
     if (!p.pageWaiting.load (std::memory_order_acquire) || !tryLockAudio (p)) return;
-    uint64_t now = 0;
     while (p.taken != p.written)
     {
         const auto& command = p.commands[p.taken % Plugin::pageCapacity];
@@ -251,8 +259,10 @@ void takePageCommands (Plugin& p, const clap_output_events* out, bool allowPress
         if (edit.press)
         {
             if (!allowPress) break;
-            if (!now) now = steadyMs();
-            if (now - command.time <= 500)
+            // A press half a second of rendered audio old is stale; one queued while the host slept (no audio
+            // ran, so its age is nothing) still fires on waking.
+            const uint64_t grace = (uint64_t) (p.sampleRate.load (std::memory_order_relaxed) * 0.5);
+            if (p.audioFrames.load (std::memory_order_relaxed) - command.frame <= grace)
             {
                 clap_event_param_value press {};
                 press.header = {sizeof (press), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0};
@@ -396,6 +406,7 @@ void loadAll (Plugin& p, const float* values, const float* buffer = nullptr, boo
         for (uint32_t i = 0; i < paramCount; ++i)
             if (paramTable[i].kind != Kind::button)
                 p.engine.set (paramTable[i].id, values[i]);
+        p.engine.settle();
         if (buffer != nullptr)
             p.engine.setBuffer (full, buffer);
         publishScreen (p);
@@ -429,7 +440,7 @@ bool stateLoad (const clap_plugin* plugin, const clap_istream* stream)
     char tag[4] = {};
     uint32_t header[2] = {};
     if (! readAll (stream, tag, 4) || std::memcmp (tag, stateTag, 4) != 0 || ! readAll (stream, header, sizeof (header))
-        || header[0] == 0 || header[1] > 4096)
+        || header[0] == 0 || header[0] > stateVersion || header[1] > 4096)
         return false;
     float loaded[paramCount];
     for (uint32_t i = 0; i < paramCount; ++i)
@@ -555,6 +566,9 @@ void pluginDestroy (const clap_plugin* plugin)
 bool pluginActivate (const clap_plugin* plugin, double rate, uint32_t, uint32_t)
 {
     auto& p = of (plugin);
+    if (! (rate > 0.0) || ! std::isfinite (rate)) // the engine divides by it
+        return false;
+    p.sampleRate.store (rate, std::memory_order_relaxed);
     p.engine.prepare (rate);
     p.active = true;
     return true;
@@ -594,12 +608,16 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     float* left = process->audio_outputs[0].data32[0];
     float* right = process->audio_outputs[0].channel_count > 1 ? process->audio_outputs[0].data32[1] : nullptr;
 
-    // What the main thread loaded (a state or a preset, while playing): the engine takes each value it does not have.
+    // What the main thread loaded (a state or a preset, while playing): the engine takes each value it does not
+    // have, and the glides settle on them at once (a load is not a hand turning a knob).
     const uint32_t since = p.loads.load (std::memory_order_acquire);
     if (p.mainChanged.exchange (false, std::memory_order_acquire))
+    {
         for (uint32_t i = 0; i < paramCount; ++i)
             if (paramTable[i].kind != Kind::button)
                 p.engine.set (paramTable[i].id, p.values[i].load (std::memory_order_relaxed));
+        p.engine.settle();
+    }
     if (p.bufferLoaded.exchange (false, std::memory_order_acquire))
     {
         float values[seqStateCount];
@@ -668,6 +686,7 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     // What the engine changed itself, heard by the host at the block's end.
     publish (p, process->out_events, last, since);
     publishScreen (p);
+    p.audioFrames.fetch_add (frames, std::memory_order_relaxed);
     // Never "sleep": the sequencers must hear the next Play, which is no event. (Melodee puts an idle instrument to
     // sleep itself, and the engine skips its own work while the VCAs are closed.)
     return CLAP_PROCESS_CONTINUE;
@@ -706,7 +725,7 @@ bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* input
             unlock (p);
             return false;
         }
-        p.commands[p.written++ % Plugin::pageCapacity] = {edit, edit.press ? steadyMs() : 0};
+        p.commands[p.written++ % Plugin::pageCapacity] = {edit, edit.press ? p.audioFrames.load (std::memory_order_relaxed) : 0};
         if (!edit.press)
         {
             const int i = paramIndex (edit.id);
@@ -729,6 +748,26 @@ bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* input
 void screenKnobs (const clap_plugin* plugin, clap_id ids[3]) { of (plugin).screen.knobs (ids); }
 const clap_plugin_melodee_screen screenExtension { screenPaint, screenInput, screenKnobs };
 
+// Latency: the decimator's 47-tap half-band FIR at twice the host's rate, measured by impulse (its centre tap
+// sits 11 host frames back; an odd inner sample's energy centres half a frame later). The same at every rate,
+// in frames. (The Mod VCO's triangle runs one inner sample behind, inside that rounding.)
+uint32_t latencyGet (const clap_plugin*) { return 11; }
+const clap_plugin_latency latencyExtension { latencyGet };
+
+// Tail: EG2 ringing from a full trigger to exact zero (the envelope is zeroed at 1.6e-5, so 1.5986 times its
+// knob's -60 dB time, plus the 1 ms attack, 1 ms more and the decimator's 11 frames; host tests measure the
+// last nonzero frame against it). With Drone the VCAs never close: no end.
+uint32_t tailGet (const clap_plugin* plugin)
+{
+    const auto& p = of (plugin);
+    if (p.values[paramIndex (ParamId::drone)].load (std::memory_order_relaxed) >= 0.5f)
+        return 0xffffffffu; // at least INT32_MAX: infinite
+    const float knob = p.values[paramIndex (ParamId::eg2Decay)].load (std::memory_order_relaxed);
+    const double seconds = (double) decaySeconds (knob) * 1.5986 + (double) attackSeconds + 0.001;
+    return (uint32_t) std::ceil (seconds * p.sampleRate.load (std::memory_order_relaxed)) + 11;
+}
+const clap_plugin_tail tailExtension { tailGet };
+
 const void* pluginExtension (const clap_plugin*, const char* id)
 {
     if (std::strcmp (id, CLAP_EXT_MELODEE_SCREEN) == 0) return &screenExtension;
@@ -737,6 +776,8 @@ const void* pluginExtension (const clap_plugin*, const char* id)
     if (std::strcmp (id, CLAP_EXT_AUDIO_PORTS) == 0) return &audioExtension;
     if (std::strcmp (id, CLAP_EXT_NOTE_PORTS) == 0) return &noteExtension;
     if (std::strcmp (id, CLAP_EXT_PRESET_LOAD) == 0 || std::strcmp (id, CLAP_EXT_PRESET_LOAD_COMPAT) == 0) return &presetExtension;
+    if (std::strcmp (id, CLAP_EXT_LATENCY) == 0) return &latencyExtension;
+    if (std::strcmp (id, CLAP_EXT_TAIL) == 0) return &tailExtension;
     return nullptr;
 }
 

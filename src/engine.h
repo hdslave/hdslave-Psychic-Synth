@@ -34,6 +34,7 @@ inline float clampf (float x, float lo, float hi) { return std::fmin (std::fmax 
 // cutoff, whose octaves the parameter ranges keep within [-40, 40]; envelope rates use exp.
 inline float exp2Fast (float x)
 {
+    x = clampf (x, -40.0f, 40.0f); // the documented span, enforced (out-of-span bits would not be a float at all)
     const float xi = std::rint (x), f = x - xi;
     const float p = 1.0f + f * (0.69314718f + f * (0.24022651f + f * (0.05550411f + f * (0.00961813f + f * 0.00133336f))));
     const int32_t bits = ((int32_t) xi + 127) << 23;
@@ -85,6 +86,8 @@ struct Envelope
         peak = attacking ? std::max (peak, level) : level;
         attacking = peak > value;
     }
+    // Stopped where it is (the host's silence); the rates stay, so the next trigger charges as it should.
+    void silence() { value = peak = 0.0f; attacking = false; }
     bool idle() const { return ! attacking && value == 0.0f; }
     float next()
     {
@@ -273,6 +276,7 @@ public:
             c = Clock {};
         for (auto& l : lanes)
             l.play = -1, l.offset = 0, l.held = 0.0f, l.aligned = false, l.hit = false, l.previewAt = ~uint64_t (0), l.previewLevel = 0.0f;
+        silenced = false;
         dirty = true;
         retarget();
         for (int i = 0; i < smoothed; ++i)
@@ -372,6 +376,27 @@ public:
             strikeLevel (velocity);
     }
 
+    // The host's silence (a choke, All Sound Off, All Notes Off): both envelopes stop and the VCAs shut, Drone
+    // notwithstanding, until the next strike (a step that hits, Trigger, a note or pad) opens them again. The
+    // decimator flushes what it holds over its next dozen frames, then the output is exact silence.
+    [[gnu::noinline]] void silence()
+    {
+        eg1.silence();
+        eg2.silence();
+        silenced = true;
+    }
+
+    // A state or preset was loaded over whatever was sounding: the knobs are where the load put them at once
+    // (no easing to them across the next millisecond).
+    void settle()
+    {
+        if (dirty)
+            retarget();
+        for (int i = 0; i < smoothed; ++i)
+            smooth[i] = target[i];
+        moving = false;
+    }
+
     // A value the engine set itself (Bit Flip, Bit Shift, Corrupt, Recall), once each: the host must hear them as the
     // parameters' values.
     bool takeChange (uint32_t& id, float& value)
@@ -389,7 +414,6 @@ public:
     // order.
     bool takeBufferSaved() { const bool was = bufferSaved; bufferSaved = false; return was; }
     const float* bufferValues() const { return buffer; }
-    bool hasBuffer() const { return bufferFull; }
     void setBuffer (bool full, const float* values)
     {
         bufferFull = full;
@@ -524,6 +548,7 @@ private:
     };
 
     bool running() const { return playing && knob[ParamId::run] >= 0.5f; }
+    bool open() const { return droning && ! silenced; } // Drone holds the VCAs open, unless silenced
     bool ownClock2() const { return knob[ParamId::clock2] >= 0.5f; }
 
     // A sequencer's ring: its own bits up to its Length, or with Chain Seq both sequences, SEQ 1's then SEQ 2's.
@@ -708,9 +733,12 @@ private:
             // host such as Melodee tells of it only at the next block, so the clocks ran on past the loop's end; its
             // end is its start). That clock was b, and b does not play again.
             stood[c] = ! fresh && std::fabs ((double) ((int64_t) now - clocks[c].at) - late) <= 2.0;
-            // Otherwise, just past a step's start (less than a block: a wrap seen early enough, a Play landing a hair
-            // late): that step plays at once; further in, the next step is the first.
-            clocks[c].last = stood[c] ? b[c] : b[c] - (late < window ? 1 : 0);
+            // Otherwise, just past a step's start: that step plays at once; further in, the next step is the first.
+            // A Play's grace is fixed at the device's 128 frames (what a 128-frame block did before), so the step
+            // it lands in is the same whatever the block size; a jump or wrap keeps the block window, because a
+            // wrap inside a block is only seen a block late.
+            const double within = fresh ? 128.0 : window;
+            clocks[c].last = stood[c] ? b[c] : b[c] - (late < within ? 1 : 0);
             clocks[c].regridWanted = false;
         }
         position = beats;
@@ -763,6 +791,7 @@ private:
     {
         if (level <= 0.0f)
             return;
+        silenced = false; // a strike after the host's silence sounds again
         eg1.trigger (level);
         eg2.trigger (level);
     }
@@ -897,7 +926,7 @@ private:
                     smooth[k] = target[k];
                 moving = false;
             }
-            if (eg1.idle() && eg2.idle() && ! droning && decimator.silent())
+            if (eg1.idle() && eg2.idle() && ! open() && decimator.silent())
             {
                 const uint32_t n = frames - i;
                 std::memset (left + i, 0, sizeof (float) * n);
@@ -928,7 +957,7 @@ private:
                 }
             }
             float y;
-            if (eg2.idle() && ! droning && decimator.silent())
+            if (eg2.idle() && ! open() && decimator.silent())
             {
                 // The VCAs are closed: EG1 runs down; the oscillators and filter wait.
                 eg1.next(), eg1.next();
@@ -965,10 +994,10 @@ private:
     [[gnu::always_inline]] float voice()
     {
         const float e1 = eg1.next();
-        if (eg2.idle() && ! droning)
+        if (eg2.idle() && ! open())
             return 0.0f;
         const float e2 = eg2.next();
-        const float vca = droning ? 1.0f : e2;
+        const float vca = open() ? 1.0f : e2;
         // The Mod VCO first (it modulates the VCO): its pitch from the knob, SEQ 2 and EG1.
         const float dtMod = clampf (exp2Fast (smooth[modPitch] + e1 * smooth[modEg]) * invInner, 1.0e-9f, 0.45f);
         const float tri = mod.step (dtMod);
@@ -1023,7 +1052,7 @@ private:
     float transpose = 0.0f;
     float cvShift = 0.0f; // the transposition an Unquantized sequence gets with Run off, in octaves (retarget)
     int order = 0;
-    bool droning = false, chained = false;
+    bool droning = false, chained = false, silenced = false; // silenced: the host's silence holds until a strike
     bool playing = false, dirty = true, moving = false;
     Lane lanes[2];
     Clock clocks[2];
