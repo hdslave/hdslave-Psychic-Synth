@@ -10,7 +10,7 @@
 #include <strings.h>
 
 #ifndef PSYCHIC_VERSION
-#define PSYCHIC_VERSION "0.2.0"
+#define PSYCHIC_VERSION "0.2.1"
 #endif
 
 namespace psychic
@@ -92,7 +92,8 @@ constexpr float qtzFrom = 0.98f;
 inline float seqAmtScale (float k) { return k >= qtzFrom ? 1.0f : k / qtzFrom; }
 // EG attacks: decay-only on the panel, but a capacitor still takes a moment to charge: 1 ms.
 constexpr float attackSeconds = 0.001f;
-// MIDI notes transpose the quantized sequences: this note leaves them where they are (middle C).
+// MIDI notes transpose the quantized sequences (with Run off the unquantized ones too): this note leaves them where
+// they are (middle C).
 constexpr int transposeNote = 60;
 // With Run on, the 16 notes from here are step pads: SEQ 1's bits 1-8, then SEQ 2's bits 1-8 (hdslaveOS's pads A01-A16
 // on a plug-in track at its default octave and key). Chained, that is the ring's 16 bits in order.

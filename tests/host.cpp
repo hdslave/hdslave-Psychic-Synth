@@ -2,9 +2,9 @@
 // the sequencers against the host's transport (timing to the frame, stop, restart, jumps, a loop that wraps inside a
 // block), the same output whatever the block size, the buttons, the bits and their CVs (Bit Flip, Bit Shift, Length,
 // Chain Seq, Reset, Advance, Corrupt, Save and Recall, all heard back by the host), EG Trig Mix, a softer trigger in a
-// louder one's attack, the quantizer and MIDI transposing, the step pads (notes 36-51 with Run on), Clock 2, the
-// routing (Order, Blend, Fold, Drone, Noise Tone) and bounded output at extreme settings. Writes demo renders as WAV
-// files into the output folder.
+// louder one's attack, the quantizer and MIDI transposing (Unquantized too with Run off), the step pads (notes 36-51
+// with Run on), Clock 2, the routing (Order, Blend, Fold, Drone, Noise Tone) and bounded output at extreme settings.
+// Writes demo renders as WAV files into the output folder.
 //   host Psychic.clap OUT_FOLDER
 #include "wav.h"
 #include "../src/melodee_screen.h"
@@ -1060,7 +1060,8 @@ void testPitchAndQuantizer()
     CHECK (near (held ({ { "Seq 1 CV 1", 0.1 }, { "VCO Seq 1 Amt", 0.49 } }), root * std::exp2 (2.5 / 12.0)));
     // CV Range: the CV's reach (a quarter of it: +-1.25 octaves; CV 0.4 is half an octave again).
     CHECK (near (held ({ { "Seq 1 CV 1", 0.4 }, { "CV Range 1", 0.25 }, { "Quantize", 0.0 } }), root * std::exp2 (0.5)));
-    // A MIDI note transposes the quantized sequence: G above middle C, 7 semitones up; Unquantized it does not.
+    // A MIDI note transposes the quantized sequence: G above middle C, 7 semitones up; Unquantized, with Run on, it
+    // does not (with Run off it does since 0.2.1: testUnquantizedKeys).
     auto note = [] (int key) {
         return [key] (uint64_t at, uint32_t, Events& e) {
             if (at == 0) e.note (0, CLAP_EVENT_NOTE_ON, (int16_t) key, 1.0);
@@ -1708,7 +1709,8 @@ void testStepPads()
     // A pad never transposes: after the fifth, pad 50 (SEQ 2's bit 7) leaves SEQ 1 and the transposition as they were.
     hz = pitches ({}, { { 0, 67 }, { 48000, 50 } }, all, stopped);
     CHECK (near (hz[0], root * std::exp2 (7.0 / 12.0)) && near (hz[1], root * std::exp2 (7.0 / 12.0)));
-    // Unquantized: the CV as it is (6 semitones), and notes do not transpose (as before 0.2.0).
+    // Unquantized: the CV as it is (6 semitones), and with Run on notes do not transpose (as before 0.2.0; with Run off
+    // they do since 0.2.1: testUnquantizedKeys).
     hz = pitches ({ { "Quantize", 0.0 } }, { { 0, 67 }, { 0, 38 } }, all, stopped);
     CHECK (near (hz[0], root * std::exp2 (6.0 / 12.0)));
     // SEQ 2's pads move only SEQ 2 apart; chained, the ring's bit goes to both outputs (SEQ 2's bit 1 at CV 0.2: up an
@@ -1897,6 +1899,154 @@ void testStepPads()
             for (auto& v : out.values) lastY[v.id] = v.value;
             CHECK (lastX == lastY);
         }
+    }
+}
+
+// 0.2.1: with Run off (the sequencer off), every note transposes Unquantized too, so the pads play notes chromatically:
+// the note's distance from middle C goes onto both CV outputs after CV Range, where the quantized modes add it, and
+// through the same Seq Amt. With Run on, Unquantized still ignores the transposition, as the panel does (the step pads
+// and the notes outside them as in 0.2.0).
+void testUnquantizedKeys()
+{
+    std::vector<float> l, r;
+    // Something on a frame, in the order listed: a note (key >= 0) or a parameter's value (a button pressed at 1).
+    struct Ev { uint64_t when; int key; std::string name = ""; double value = 1.0; };
+    auto play = [&] (Values v, std::vector<Ev> list, const std::function<Transport (uint64_t)>& transport, uint32_t frames,
+                     std::vector<float>& out, uint32_t block = 128) {
+        Instance a;
+        a.setup (v);
+        a.render (frames, block, out, r, transport, [&] (uint64_t at, uint32_t n, Events& e) {
+            for (const auto& h : list)
+                if (h.when >= at && h.when < at + n)
+                {
+                    if (h.key >= 0)
+                        e.note ((uint32_t) (h.when - at), CLAP_EVENT_NOTE_ON, (int16_t) h.key, h.value);
+                    else
+                        e.param ((uint32_t) (h.when - at), a.id (h.name), h.value);
+                }
+        });
+    };
+    const double root = 320.0, mod = 0.16 * std::exp2 (9.75);
+    auto near = [] (double hz, double want) { return std::fabs (hz / want - 1.0) < 0.002; };
+    auto semis = [] (double s) { return std::exp2 (s / 12.0); };
+    auto pitches = [&] (const std::vector<float>& x, std::vector<std::pair<size_t, size_t>> windows) {
+        std::vector<double> hz;
+        for (const auto& [from, to] : windows)
+            hz.push_back (frequency (x, from, to));
+        if (debug())
+        {
+            std::printf ("debug unquantized keys:");
+            for (double h : hz) std::printf (" %.2f", h);
+            std::printf ("\n");
+        }
+        return hz;
+    };
+    // The VCO alone, held open by Drone, SEQ 1 at full CV Range and at QTZ (1 V/octave), Length 1, Unquantized, Run off.
+    Instance names;
+    const double unquantized = names.valueOf ("Quantize", "Unquantized"), chromatic = names.valueOf ("Quantize", "Chromatic");
+    auto vco = [&] (Values extra = {}) {
+        Values v { { "Drone", 1.0 }, { "Bits 1", 1 }, { "Length 1", 1 }, { "VCO Freq", 0.5 }, { "VCO Level", 0.5 }, { "Mod VCO Level", 0.0 },
+                   { "FM Amt", 0.0 }, { "Fold", 0.0 }, { "VCW EG1 Amt", 0.0 }, { "VCO EG1 Amt", 0.0 }, { "Blend", 0.0 }, { "CV Range 1", 1.0 },
+                   { "VCO Seq 1 Amt", 1.0 }, { "Seq 1 CV 1", 0.0 }, { "Quantize", unquantized }, { "Run", 0.0 } };
+        v.insert (v.end(), extra.begin(), extra.end());
+        return v;
+    };
+    const auto quarters = std::vector<std::pair<size_t, size_t>> { { 2000, 22000 }, { 26000, 46000 }, { 50000, 70000 }, { 74000, 94000 } };
+
+    // Run off: notes 36, 37 and 48 (pads A01, A02 and A13) a semitone and an octave apart, each its distance from middle
+    // C, then 60 back where the CV puts it: stopped, and with the host playing (the sequences hold, silent).
+    for (bool playing : { false, true })
+    {
+        play (vco(), { { 0, 36 }, { 24000, 37 }, { 48000, 48 }, { 72000, 60 } }, playing ? from0 : stopped, 96000, l);
+        const auto hz = pitches (l, quarters);
+        CHECK (near (hz[0], root * semis (-24.0)) && near (hz[1], root * semis (-23.0)) && near (hz[2], root * semis (-12.0)) && near (hz[3], root));
+        CHECK (near (hz[1] / hz[0], semis (1.0)) && near (hz[2] / hz[0], 2.0));
+    }
+    // The same route as the quantized modes: with the CV at 0, Unquantized and Chromatic sound the same notes to the bit.
+    {
+        std::vector<float> chroma;
+        const std::vector<Ev> keys { { 0, 36 }, { 24000, 37, "", 0.7 }, { 48000, 48 }, { 72000, 72, "", 0.4 } };
+        play (vco(), keys, stopped, 96000, l);
+        play (vco ({ { "Quantize", chromatic } }), keys, stopped, 96000, chroma);
+        CHECK (l == chroma && near (frequency (l, 74000, 94000), root * 2.0));
+    }
+    // A CV between notes keeps its place, transposed: CV 0.105 (6.3 semitones, put on the output by an Advance) under
+    // note 37 is 16.7 semitones down (Chromatic would make it 17).
+    play (vco ({ { "Seq 1 CV 1", 0.105 } }), { { 0, -1, "Advance" }, { 0, 37 } }, stopped, 48000, l);
+    CHECK (near (pitches (l, { { 4000, 46000 } })[0], root * semis (6.3 - 23.0)));
+    // Below QTZ the transposition comes in scaled with the CV, as quantized: half the turn, half of note 48's octave.
+    play (vco ({ { "VCO Seq 1 Amt", 0.49 } }), { { 0, 48 } }, stopped, 48000, l);
+    CHECK (near (pitches (l, { { 4000, 46000 } })[0], root * semis (-6.0)));
+    // SEQ 2's output too: the Mod VCO alone at QTZ, an octave down under note 48.
+    {
+        Values v { { "Drone", 1.0 }, { "VCO Level", 0.0 }, { "Ring Mod Level", 0.0 }, { "Noise Level", 0.0 }, { "Mod VCO Level", 0.5 },
+                   { "Mod VCO Freq", 0.75 }, { "Fold", 0.0 }, { "VCW EG1 Amt", 0.0 }, { "Mod VCO EG1 Amt", 0.0 }, { "Blend", 0.0 },
+                   { "Bits 2", 1 }, { "Length 2", 1 }, { "Seq 2 CV 1", 0.0 }, { "Mod VCO Seq 2 Amt", 1.0 }, { "Quantize", unquantized }, { "Run", 0.0 } };
+        play (v, { { 0, 48 } }, stopped, 48000, l);
+        CHECK (near (pitches (l, { { 4000, 46000 } })[0], mod / 2.0));
+    }
+
+    // Run on, Unquantized: the notes outside the step pads still leave the pitch alone, stopped (they play) and playing
+    // (bit 1, CV 0, on every step); and a step pad plays its bit's CV as it is, untransposed: pad 36 (CV 0.1, 6 semitones)
+    // after note 52.
+    for (bool playing : { false, true })
+    {
+        play (vco ({ { "Run", 1.0 } }), { { 0, 35 }, { 24000, 52 }, { 48000, 67 }, { 72000, 72 } }, playing ? from0 : stopped, 96000, l);
+        const auto hz = pitches (l, quarters);
+        CHECK (near (hz[0], root) && near (hz[1], root) && near (hz[2], root) && near (hz[3], root));
+    }
+    play (vco ({ { "Run", 1.0 }, { "Seq 1 CV 1", 0.1 } }), { { 0, 52 }, { 0, 36 } }, stopped, 48000, l);
+    CHECK (near (pitches (l, { { 4000, 46000 } })[0], root * semis (6.0)));
+
+    // Run switched over a held transposition: note 48 with Run off (an octave down); Run on: Unquantized ignores it (the
+    // CV as it is); Run off again: the octave down is back (the last note's transposition holds, as quantized). Stopped,
+    // and playing (with Run on, SEQ 1 steps on its bit 1, CV 0).
+    for (bool playing : { false, true })
+    {
+        play (vco(), { { 0, 48 }, { 30000, -1, "Run", 1.0 }, { 60000, -1, "Run", 0.0 } }, playing ? from0 : stopped, 96000, l);
+        const auto hz = pitches (l, { { 4000, 28000 }, { 34000, 58000 }, { 64000, 94000 } });
+        CHECK (near (hz[0], root / 2.0) && near (hz[1], root) && near (hz[2], root / 2.0));
+    }
+    // Settings on a frame come before its notes: Run switched off with a note (sent first) on one frame makes it the
+    // keyboard's, transposing, as with Run off all along; switched on with note 52 (outside the pads), the note leaves
+    // the pitch, as with Run on all along. To the bit.
+    {
+        std::vector<float> switched, along;
+        play (vco ({ { "Run", 1.0 } }), { { 12800, 37 }, { 12800, -1, "Run", 0.0 } }, stopped, 36000, switched);
+        play (vco(), { { 12800, 37 } }, stopped, 36000, along);
+        CHECK (switched == along && near (pitches (switched, { { 16000, 34000 } })[0], root * semis (-23.0)));
+        play (vco(), { { 12800, 52 }, { 12800, -1, "Run", 1.0 } }, stopped, 36000, switched);
+        play (vco ({ { "Run", 1.0 } }), { { 12800, 52 } }, stopped, 36000, along);
+        CHECK (switched == along && near (pitches (switched, { { 16000, 34000 } })[0], root));
+    }
+
+    // The same output whatever the block size (1, 37, 128, 4096 frames): both sequences heard, Unquantized, Run off;
+    // pads and notes outside them, two on one frame, Run switched on (pads become steps) and off again mid-block, an
+    // Advance, Quantize to Chromatic and back; stopped and playing.
+    for (bool playing : { false, true })
+    {
+        Instance a;
+        Values v { { "Clock Div", a.valueOf ("Clock Div", "1/16") }, { "Bits 1", 0x5a }, { "Bits 2", 0xa5 }, { "EG Trig Mix", 0.5 }, { "Run", 0.0 },
+                   { "Quantize", unquantized }, { "CV Range 1", 0.5 }, { "CV Range 2", 0.5 }, { "VCW Seq 1 Amt", 0.4 }, { "VCF Seq 2 Amt", 0.6 },
+                   { "Mod VCO Level", 0.4 }, { "Mod VCO Freq", 0.6 }, { "EG2 Decay", 0.3 }, { "Fold", 0.2 } };
+        for (int i = 0; i < 8; ++i)
+        {
+            v.push_back ({ "Seq 1 CV " + std::to_string (i + 1), -0.7 + 0.19 * i });
+            v.push_back ({ "Seq 2 CV " + std::to_string (i + 1), 0.65 - 0.17 * i });
+        }
+        const std::vector<Ev> list { { 3000, 36 }, { 9001, 37, "", 0.6 }, { 15000, 48 }, { 21003, 60, "", 0.5 }, { 27000, 40 }, { 27000, 45, "", 0.8 },
+                                     { 33333, -1, "Run", 1.0 }, { 39000, 52 }, { 45000, 38 }, { 50001, -1, "Run", 0.0 }, { 56000, 30 },
+                                     { 61111, -1, "Advance" }, { 66000, -1, "Quantize", chromatic }, { 70000, 50, "", 0.9 },
+                                     { 76543, -1, "Quantize", unquantized }, { 82000, 47 }, { 88888, 71, "", 0.3 } };
+        std::vector<float> at128;
+        play (v, list, playing ? from0 : stopped, 96000, at128);
+        bool same = true;
+        for (uint32_t block : { 1u, 37u, 4096u })
+        {
+            play (v, list, playing ? from0 : stopped, 96000, l, block);
+            same &= l == at128;
+        }
+        CHECK (same && std::count_if (at128.begin(), at128.end(), [] (float x) { return x != 0.0f; }) > 20000);
     }
 }
 
@@ -2145,6 +2295,7 @@ int main (int argc, char** argv)
     testMidBlockLoop();
     testHostEdges();
     testStepPads();
+    testUnquantizedKeys();
     testScreen();
     testExtremes();
     demos (argv[2]);

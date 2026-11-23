@@ -8,7 +8,7 @@ Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melo
 
 Its sequencers lock tightly to the host transport and beat grid. Under **hdslaveOS**, Psychic draws its animated **Contact Sheet** screen comparing saved and live steps side by side with direct per-cell gate and voltage editing.
 
-Version 0.2.0. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
+Version 0.2.1. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
 (`clap_check`), but nobody has played it on the device yet.
 
 ## Contact Sheet on the MPC Sample
@@ -150,10 +150,13 @@ The public CLAP parameter names and their panel equivalents are listed below.
   the scale's root by its distance from middle C (60), and the transposition holds until the next note. While the
   sequences are not running (the host stopped), it also fires both envelopes at the note's velocity. A note on Play's
   own frame counts as running (it only transposes); one on Stop's frame plays.
+- With Run on and Quantize at Unquantized, notes do not transpose, as on the panel (they still fire the envelopes where
+  they would). Pads still play their bits' CVs, unquantized.
 - **Run off (the sequencer off): the pads play notes.** Every note, the pads too, transposes as above and also fires
-  both envelopes at its velocity, so Psychic plays like a mono synth.
-- Unquantized, notes do not transpose (they still fire the envelopes where they would). Pads still play their bits'
-  CVs, unquantized.
+  both envelopes at its velocity, so Psychic plays like a mono synth. This holds Unquantized too: there the note's
+  distance from middle C is added to the CV as it is, so pads 1, 2 and 13 (notes 36, 37 and 48) play a semitone and an
+  octave apart, with VCO Seq 1 Amt at QTZ. Switching Run on keeps the last note's transposition for when Run goes off
+  again, but Unquantized ignores it while Run is on.
 
 ## Presets
 
@@ -206,6 +209,8 @@ these, so they are chosen to fit what it does document:
   from 0 at 12 o'clock to 50 % at full.
 - The sequencer's CV holds from one on bit to the next. Off bits leave it where it is.
 - MIDI notes transpose from middle C. A note's velocity sets its envelopes' peak.
+- With Run off, notes transpose Unquantized too, which the panel's keyboard input does not: with the sequencer off the
+  pads always play notes, whatever the quantizer.
 - The step pads, which the panel does not have: notes 36–51, hdslaveOS's pads A01–A16 at its default octave and key.
   A pad fires the envelopes at its own velocity, not through EG Trig Mix, so SEQ 2's bits sound even with the mix at
   Seq 1. Chained, a pad's bit goes to both CV outputs.
@@ -278,7 +283,12 @@ The tests load the plug-in through the CLAP API and check:
 - Corrupt: fully left it loops at the same pitches, at 45 % it changes notes but not the rhythm, and at full it flips
   bits, the same each time;
 - pitch: the VCO and Mod VCO to 0.2 %, seven quantizer modes, scaled Seq Amt, CV Range, and MIDI transposing (and not
-  when Unquantized; with Run off, notes 36–51 too);
+  when Unquantized with Run on; with Run off, notes 36–51 too);
+- with Run off and Unquantized, the keyboard (0.2.1): notes 36, 37 and 48 measured a semitone and an octave apart,
+  stopped and playing; the same to the bit as Chromatic with the CV at 0; a CV between notes kept and transposed; the
+  transposition scaled below QTZ and on SEQ 2's Mod VCO; with Run on, notes outside the pads still leaving the pitch and
+  pads untransposed; Run switched over a held transposition (it goes and comes back), and on a note's frame (settings
+  first); the same output at every block size;
 - the step pads: each of the 16, apart and chained, sounds to the bit as the sequencer playing its bit (stopped with
   the bit on and off, playing with a transposition, on Play's frame for bit 1); pitches measured (quantized,
   transposed, Unquantized, chained, Run off); a pad's CV held until that sequencer's next on bit; the play heads
@@ -290,11 +300,11 @@ The tests load the plug-in through the CLAP API and check:
 - routing: Order and Blend (each path the same to the bit where it should be), Fold clean at 0, Noise Tone and Drone;
 - finite, bounded output at 60 random and extreme settings, buttons pressed.
 
-`tests/fingerprint.cpp` then renders 57 fixed scenarios and hashes every output sample's bits, and the values the
+`tests/fingerprint.cpp` then renders 59 fixed scenarios and hashes every output sample's bits, and the values the
 plug-in tells the host it changed, against `tests/fingerprint.txt`. The scenarios: each preset, the bench's patches,
 24 random patches with the buttons, MIDI and knobs moving, other block sizes and rates, stop and jumps, Corrupt
 across its turn, chained moves and the buffer, Clock 2 with Swing, notes, step pads (playing, chained, stopped, and
-with Run off as the keyboard), each Order, and two-bar loops as Melodee plays them. Work meant to keep the
+with Run off as the keyboard), the keyboard Unquantized with Run switched off and on, each Order, and two-bar loops as Melodee plays them. Work meant to keep the
 sound, such as a speed-up, must leave every hash as it is. A change meant to change the sound updates them with
 `make fingerprint-update` (run inside the build image). The hashes hold for Melodee's build image and these compiler
 flags.

@@ -175,6 +175,28 @@ std::vector<Scenario> scenarios()
             s.values = { { "Run", 0.0 } };
         list.push_back (s);
     }
+    // 0.2.1: with Run off, notes transpose Unquantized too (the pads play notes): pads and notes outside them, two on one
+    // frame, then Run switched on (pads are steps, and Unquantized ignores the held transposition) and off again (it is
+    // back), an Advance; stopped and playing.
+    for (bool playing : { false, true })
+    {
+        Scenario s;
+        s.name = std::string ("keys-unquantized-") + (playing ? "playing" : "stopped");
+        s.preset = "default";
+        s.values = { { "Run", 0.0 }, { "Quantize", 0.0 } };
+        s.seconds = 4.0;
+        for (const auto& [frame, key] : std::vector<std::pair<uint64_t, int>> { { 2000, 36 }, { 14000, 37 }, { 26000, 48 }, { 38000, 43 }, { 50000, 51 },
+                                                                               { 50000, 44 }, { 62000, 60 }, { 74000, 30 }, { 86000, 72 }, { 104000, 38 },
+                                                                               { 116000, 52 }, { 128000, 47 }, { 150000, 40 }, { 160000, 65 }, { 170000, 49 } })
+            s.events.push_back ({ frame, Event::noteOn, "", (double) key });
+        s.events.push_back ({ 96001, Event::param, "Run", 1.0 });
+        s.events.push_back ({ 140003, Event::param, "Run", 0.0 });
+        s.events.push_back ({ 165000, Event::param, "Advance", 1.0 });
+        s.events.push_back ({ 175000, Event::noteOff, "", 40.0 });
+        if (! playing)
+            s.transport = [] (uint64_t, double, double) -> std::pair<bool, double> { return { false, 0.0 }; };
+        list.push_back (s);
+    }
     return list;
 }
 } // namespace

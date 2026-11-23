@@ -297,6 +297,7 @@ public:
                 clocks[1].regridWanted = ! ownClock2(); // Clock 2 on its own grid keeps it
                 break;
             case clock2: clocks[1].regridWanted = true; break;
+            case run: case quantize: updateShift(); break;
             case bits1: lanes[0].bits = (uint8_t) v; break;
             case bits2: lanes[1].bits = (uint8_t) v; break;
             case length1: lanes[0].length = std::max (1, (int) v); break;
@@ -351,8 +352,10 @@ public:
     }
 
     // A MIDI note. With Run on (the host playing or not), notes 36-51 are step pads (preview()). Every other note, and
-    // every note with Run off: transposes the quantized sequences (the note's distance from middle C); while the
-    // sequencers are not running it also triggers both envelopes, at its velocity.
+    // every note with Run off: transposes the sequences (the note's distance from middle C; Unquantized too, with Run
+    // off: see retarget and updateShift); while the sequencers are not running it also triggers both envelopes, at its
+    // velocity. A change of Run or Quantize reaches it through set() (dirty: the targets are worked out again at the
+    // next control tick, as for any knob).
     void note (int key, float velocity)
     {
         if (knob[ParamId::run] >= 0.5f && key >= firstStepNote && key < firstStepNote + 16)
@@ -361,6 +364,7 @@ public:
             return;
         }
         transpose = (float) (key - transposeNote);
+        updateShift();
         dirty = true;
         retarget();
         snapSequenced();
@@ -801,8 +805,12 @@ private:
         smooth[cut] = target[cut];
     }
 
+    // Run off with Quantize Unquantized: the note's distance from middle C, in octaves, added to the CVs (0 otherwise).
+    void updateShift() { cvShift = knob[ParamId::run] < 0.5f && scaleMask[(int) knob[ParamId::quantize]] == 0 ? transpose * (1.0f / 12.0f) : 0.0f; }
+
     // A sequencer's CV output in octaves (1 V/octave): its held CV through CV Range and the quantizer, transposed
-    // by the last MIDI note when quantized.
+    // by the last MIDI note. Unquantized, only with Run off (0.2.1: the keyboard then plays notes in every mode); with
+    // Run on, Unquantized ignores the transposition, as the panel does.
     float seqCv (int s) const
     {
         const float v = lanes[s].held * knob[s == 0 ? ParamId::cvRange1 : ParamId::cvRange2] * seqOctaves;
@@ -825,7 +833,10 @@ private:
     void retarget()
     {
         using namespace ParamId;
-        const float seq1 = seqCv (0), seq2 = seqCv (1);
+        // Run off, Unquantized (0.2.1): the keyboard transposes the CV too, so the pads play notes in every mode.
+        // cvShift is kept current by set() and note() (cold), not worked out here: the arithmetic added to this
+        // function cost a fifth more instructions a block, wherever it was put.
+        const float seq1 = seqCv (0) + cvShift, seq2 = seqCv (1) + cvShift;
         target[vcoPitch] = std::log2 (vcoLowHz) + knob[vcoFreq] * vcoOctaves + seq1 * seqAmtScale (knob[vcoSeq1Amt]);
         target[vcoEg] = knob[vcoEg1Amt] * egPitchOctaves;
         target[modPitch] = std::log2 (modLowHz) + knob[modFreq] * modOctaves + seq2 * seqAmtScale (knob[modSeq2Amt]);
@@ -1010,6 +1021,7 @@ private:
     float decay1 = 0.0f, decay2 = 0.0f, attackRate = 1.0f; // the EGs' rates, worked out when `rated`
     bool rated = true;
     float transpose = 0.0f;
+    float cvShift = 0.0f; // the transposition an Unquantized sequence gets with Run off, in octaves (retarget)
     int order = 0;
     bool droning = false, chained = false;
     bool playing = false, dirty = true, moving = false;
