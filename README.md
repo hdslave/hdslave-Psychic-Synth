@@ -10,7 +10,7 @@ Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melo
 
 Its sequencers lock tightly to the host transport and beat grid. Under **hdslaveOS**, Psychic draws its animated **Contact Sheet** screen comparing saved and live steps side by side with direct per-cell gate and voltage editing.
 
-Version 0.2.1. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
+Version 0.2.2. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
 (`clap_check`), but nobody has played it on the device yet.
 
 ## Contact Sheet on the MPC Sample
@@ -234,9 +234,9 @@ half-band FIR. Instructions a 128-frame block takes, from `tools/bench.sh` (call
 
 | Case | Instructions | Share of one A55 core at 1 instruction a cycle |
 |---|---|---|
-| Everything busy (Drone, FM, ring, noise, folding moved by EG1 and the Mod VCO, resonance, both sequencers corrupting on their own clocks) | about 82,000 | 1.7 % |
-| The default patch at 1/16 with a little Corrupt | about 81,000 | 1.7 % |
-| The same with two knobs turning all the time (Cutoff and Fold every 16 frames) | about 92,000 | 1.9 % |
+| Everything busy (Drone, FM, ring, noise, folding moved by EG1 and the Mod VCO, resonance, both sequencers corrupting on their own clocks) | about 86,000 | 1.8 % |
+| The default patch at 1/16 with a little Corrupt | about 84,000 | 1.8 % |
+| The same with two knobs turning all the time (Cutoff and Fold every 16 frames) | about 96,000 | 2.0 % |
 | Stopped | under 800 | 0.02 % |
 
 While both envelopes are idle and the VCAs closed, the oscillators and filter are skipped. A knob's change is worked
@@ -296,7 +296,8 @@ The tests load the plug-in through the CLAP API and check:
   transposed, Unquantized, chained, Run off); a pad's CV held until that sequencer's next on bit; the play heads
   unmoved (playing, and stopped with Advance); nothing heard back, Bits and CVs unchanged; two pads on one frame (the
   louder wins, on a tie the later; one of each sequence as a step with both bits on; one pad twice plays once); on,
-  on, off; a choke and a CC 120/123 storm; a pad on Play's frame with its step on and off; Run switched on or off on
+  on, off; a note off and a CC 121 storm leaving what rings; a pad on Play's frame with its step on and off; Run
+  switched on or off on
   the pad's frame; the same output at every block size;
 - Clock 2's triplets against Clock 1, with their meeting accents;
 - routing: Order and Blend (each path the same to the bit where it should be), Fold clean at 0, Noise Tone and Drone;
