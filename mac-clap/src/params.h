@@ -102,7 +102,7 @@ inline const char* const orderChoices[] = { "Parallel", "VCW > VCF", "VCF > VCW"
 // the root (bit n set: n semitones). Unquantized has none: the CV passes as it is.
 inline const char* const quantizeChoices[] = { "Unquantized", "Chromatic", "Major", "Pentatonic", "Melodic Minor", "Harmonic Minor",
                                                "Diminished 6th", "Whole Tone", "Hirajoshi", "7 Sus 4", "Major 7th", "Major 13th",
-                                               "Minor 7th", "Minor 11th", "Hang Drum", "Quads (Minor 3rds)" };
+                                               "Minor 7th", "Minor 11th", "Minor 6-Note", "Quads (Minor 3rds)" };
 constexpr uint16_t pc (int a) { return (uint16_t) (1u << a); }
 constexpr uint16_t scaleMask[] = {
     0,                                                                                     // Unquantized
@@ -119,7 +119,7 @@ constexpr uint16_t scaleMask[] = {
     pc (0) | pc (2) | pc (4) | pc (7) | pc (9) | pc (11),                                  // Major 13th: 1 3 5 6 7 9
     pc (0) | pc (3) | pc (7) | pc (10),                                                    // Minor 7th: 1 b3 5 b7
     pc (0) | pc (2) | pc (3) | pc (5) | pc (7) | pc (10),                                  // Minor 11th: 1 b3 4 5 b7 9
-    pc (0) | pc (2) | pc (3) | pc (7) | pc (8) | pc (10),                                  // Hang Drum (an integral-style minor)
+    pc (0) | pc (2) | pc (3) | pc (7) | pc (8) | pc (10),                                  // Minor 6-Note: 1 2 b3 5 b6 b7
     pc (0) | pc (3) | pc (6) | pc (9),                                                     // Quads: minor thirds
 };
 static_assert (sizeof (scaleMask) / sizeof (scaleMask[0]) == sizeof (quantizeChoices) / sizeof (quantizeChoices[0]), "a mask a mode");

@@ -10,7 +10,7 @@ Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melo
 
 Its sequencers lock tightly to the host transport and beat grid. Under **hdslaveOS**, Psychic draws its animated **Contact Sheet** screen comparing saved and live steps side by side with direct per-cell gate and voltage editing.
 
-Version 0.2.2. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
+Version 0.2.3. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
 (`clap_check`), but nobody has played it on the device yet.
 
 ## Contact Sheet on the MPC Sample
@@ -115,7 +115,7 @@ The public CLAP parameter names and their panel equivalents are listed below.
 | EG Trig Mix | EG TRIG MIX | Seq 1 … 50 / 50 … Seq 2 |
 | Clock Div | TEMPO (replaced) | 1/2 … 1/64 of the host's beat, with triplets |
 | Run | RUN/STOP | Stop / Run. Run: pads 1–16 play the steps; Stop: the pads play notes (see MIDI notes and pads) |
-| Quantize | the quantizer's 16 modes (button combinations on the panel) | Unquantized, Chromatic, Major, Pentatonic, Melodic Minor, Harmonic Minor, Diminished 6th, Whole Tone, Hirajoshi, 7 Sus 4, Major 7th, Major 13th, Minor 7th, Minor 11th, Hang Drum, Quads (Minor 3rds) |
+| Quantize | the quantizer's 16 modes (button combinations on the panel) | Unquantized, Chromatic, Major, Pentatonic, Melodic Minor, Harmonic Minor, Diminished 6th, Whole Tone, Hirajoshi, 7 Sus 4, Major 7th, Major 13th, Minor 7th, Minor 11th, Minor 6-Note, Quads (Minor 3rds) |
 | Trigger | TRIGGER | fires EG1 and EG2 at full |
 | Advance | ADVANCE | moves both play heads on a bit without playing (only while the sequences are not running) |
 | Reset | RESET | both play heads back to bit 1, which the next clock plays. The write heads keep their distance |
@@ -218,7 +218,7 @@ these, so they are chosen to fit what it does document:
   Seq 1. Chained, a pad's bit goes to both CV outputs.
 - Depths: EG1 ±8 octaves on pitch and cutoff (its 8 V at 1 V/octave), through-zero FM index 4, about four folds
   at full Fold, a Q of 10 at full Resonance, Mod VCO 0.16 Hz at its lowest, EG decays to 8 s.
-- The scales behind the names Hirajoshi (1 2 b3 5 b6) and Hang Drum (1 2 b3 5 b6 b7). Major 13th and Minor 11th
+- The scales behind the names Hirajoshi (1 2 b3 5 b6) and Minor 6-Note (1 2 b3 5 b6 b7). Major 13th and Minor 11th
   fold their 9th into the octave.
 - The mixer's overdrive, the folder's curve (a sine, scaled back below a quarter turn so it is clean at 0), the filter's
   LP … BP mix, Blend's linear crossfade.
@@ -299,6 +299,12 @@ The tests load the plug-in through the CLAP API and check:
   on, off; a note off and a CC 121 storm leaving what rings; a pad on Play's frame with its step on and off; Run
   switched on or off on
   the pad's frame; the same output at every block size;
+- the host's silence: a choke (any key) and CC 120/123 at 0 stopping a held-open Drone and the longest EG2 tail
+  within a block, the next step striking again, a note and a choke on one frame in the order sent, and a note off,
+  CC 121 and CC 120 at 64 leaving what rings untouched;
+- the reported latency (the decimator's group delay, measured by impulse through it at both inner phases) and
+  tail (EG2 ringing to exact zero, endless with Drone), and the host told when Drone or EG2 Decay changes the
+  tail — by event, by flush and by a preset load, and not by an unrelated knob or the same value again;
 - Clock 2's triplets against Clock 1, with their meeting accents;
 - routing: Order and Blend (each path the same to the bit where it should be), Fold clean at 0, Noise Tone and Drone;
 - finite, bounded output at 60 random and extreme settings, buttons pressed.
