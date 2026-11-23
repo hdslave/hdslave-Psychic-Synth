@@ -4,7 +4,7 @@
 
 ![Psychic Contact Sheet animated screen running in hdslaveOS](docs/psychic-screen.gif)
 
-> **Desktop CLAP version (macOS & Windows):** A separate desktop CLAP build with all MPC screens on one interactive panel lives in [**`mac-clap/`**](mac-clap/) (`cd mac-clap && ./install-macos.sh`). Releases in this repo stay MPC Sample-only for now while the desktop builds are being finalized; the combined 11-plug-in suite also lives at [**hdslave-Synths-and-drum-machines-Mac-Win**](https://github.com/hdslave/hdslave-Synths-and-drum-machines-Mac-Win).
+> **Desktop CLAP version (macOS & Windows):** A separate desktop CLAP build with all MPC screens on one interactive panel lives in [**`mac-clap/`**](mac-clap/) (`cd mac-clap && ./install-macos.sh`). Releases in this repo stay MPC Sample-only for now while the desktop builds are being finalized.
 
 Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melodee-sample) / [hdslaveOS](https://github.com/hdslave/hdslaveOS) (64-bit ARM Linux, Cortex-A55). Hosts list it as **hdslave Psychic** (id `com.hdslave.psychic`). It follows the front panel and normalled signal flow of the Moog Labyrinth (without the patch bay): a sine VCO and triangle Mod VCO with through-zero FM, ring mod, and noise feeding an overdriving mixer, a wavefolder, and a 2-pole state-variable filter (parallel or series), two VCAs, and Blend — driven by two corruptible 8-bit sequencers that can chain into a 16-step ring. Four classic patch-bay moves are built right in: a second clock, Mod VCO into Fold and Cutoff, and VCA drone hold.
 
