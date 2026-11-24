@@ -37,7 +37,7 @@ class Screen
   public:
     struct Edit
     {
-        clap_id id = CLAP_INVALID_ID;
+        uint32_t id = MELODEE_SCREEN_NO_CONTROL;
         float value = 0;
         bool press = false;
     };
@@ -46,8 +46,8 @@ class Screen
 
     void setMemory (const std::array<float, seqStateCount>& saved, bool full);
     bool input (const melodee_screen_input_t& input, Edit& edit);
-    void knobs (clap_id ids[3]) const;
-    bool paint (const melodee_screen_canvas_t& canvas);
+    void knobs (uint32_t ids[3]) const;
+    bool paint (const melodee_screen_frame_t& frame);
 
     bool animating () const { return spinning || (group == 0 && !inspector && (flash[0] || flash[1])); }
 
@@ -68,7 +68,8 @@ class Screen
     int ringFrame = 0;
     bool spinning = false;
     bool inspector = false, editing = false, shift = false;
-    melodee_screen_knob_t pots[3]{};
+    int16_t pots[3]{-1, -1, -1};
+    bool potsLive[3]{};
 
     int row () const { return cursors[group]; }
 
@@ -78,7 +79,7 @@ class Screen
 
     int head (int lane, bool write) const { return int ((heads >> (10 * lane + (write ? 5 : 0))) & 31); }
 
-    int orbitFrame (const melodee_screen_canvas_t& canvas);
+    int orbitFrame (const melodee_screen_frame_t& frame);
     bool cellChanged (int cell) const;
     void selectGroup (int n);
     void header (hdui::Raster& r) const;

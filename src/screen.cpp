@@ -164,24 +164,24 @@ void ScreenFeed::setTransport (double beats, double bpm)
     orbitClock.store (milliBpm * ticksPerTurn + phase, std::memory_order_relaxed);
 }
 
-int Screen::orbitFrame (const melodee_screen_canvas_t& canvas)
+int Screen::orbitFrame (const melodee_screen_frame_t& frame)
 {
-    if (!canvas.playing)
+    if (!frame.playing)
     {
         spinning = false;
         return 0;
     }
     const auto clock = feed.orbitClock.load (std::memory_order_relaxed);
-    if (!spinning || clock != lastOrbitClock || canvas.now_ms < orbitAnchorMs)
+    if (!spinning || clock != lastOrbitClock || frame.time_ms < orbitAnchorMs)
     {
         lastOrbitClock = clock;
-        orbitAnchorMs = canvas.now_ms;
+        orbitAnchorMs = frame.time_ms;
     }
     spinning = true;
     const double phase = double (clock % ScreenFeed::ticksPerTurn) / ScreenFeed::ticksPerTurn;
     const double bpm = double (clock / ScreenFeed::ticksPerTurn) / 1000.0;
     // The screen clock carries the rotation between audio blocks and through the host's idle gate.
-    const double turns = phase + double (canvas.now_ms - orbitAnchorMs) * bpm / 240000.0;
+    const double turns = phase + double (frame.time_ms - orbitAnchorMs) * bpm / 240000.0;
     return int ((turns - std::floor (turns)) * orbit::frames);
 }
 
@@ -207,7 +207,7 @@ void Screen::selectGroup (int n)
             if (std::strcmp (p.module, groups[group]) == 0) fields[rows++] = p.id;
 }
 
-void Screen::knobs (clap_id ids[3]) const
+void Screen::knobs (uint32_t ids[3]) const
 {
     if (!group)
     {
@@ -219,13 +219,13 @@ void Screen::knobs (clap_id ids[3]) const
     for (int k = 0; k < 3; ++k)
     {
         const int n = row () + k;
-        ids[k] = n < rows && parameter (fields[n]).kind != Kind::button ? fields[n] : CLAP_INVALID_ID;
+        ids[k] = n < rows && parameter (fields[n]).kind != Kind::button ? fields[n] : MELODEE_SCREEN_NO_CONTROL;
     }
 }
 
 bool Screen::input (const melodee_screen_input_t& e, Edit& out)
 {
-    if (e.kind == MELODEE_SCREEN_NUDGE && !editing)
+    if (e.kind == MELODEE_SCREEN_STEP && !editing)
     {
         if (inspector && e.value < 0)
             inspector = false;
@@ -269,12 +269,12 @@ bool Screen::input (const melodee_screen_input_t& e, Edit& out)
         }
         else if (!editing && e.kind == MELODEE_SCREEN_WHEEL)
             cursors[group] = int (std::clamp<int64_t> (int64_t (row ()) + e.value, 0, rows - 1));
-        else if (editing && (e.kind == MELODEE_SCREEN_WHEEL || e.kind == MELODEE_SCREEN_NUDGE))
+        else if (editing && (e.kind == MELODEE_SCREEN_WHEEL || e.kind == MELODEE_SCREEN_STEP))
         {
             const float old = feed.value (values, paramIndex (p.id));
-            const float step = p.kind == Kind::continuous ? (p.max - p.min) / (e.kind == MELODEE_SCREEN_NUDGE ? 16
-                                                                               : e.shift                      ? 1024
-                                                                                                              : 128)
+            const float step = p.kind == Kind::continuous ? (p.max - p.min) / (e.kind == MELODEE_SCREEN_STEP ? 16
+                                                                               : e.shift                     ? 1024
+                                                                                                             : 128)
                                                           : 1;
             const float next = clampParam (p, old + e.value * step);
             if (next != old) out = {p.id, next, false};
@@ -538,7 +538,7 @@ void Screen::footer (Raster& r) const
                 muted);
         return;
     }
-    clap_id bindings[3];
+    uint32_t bindings[3];
     knobs (bindings);
     for (int k = 0; k < 3; ++k)
     {
@@ -548,7 +548,7 @@ void Screen::footer (Raster& r) const
         std::snprintf (label, sizeof (label), "K%d", k + 1);
         clipped (r, x, 1, 18, 12, k == 1 ? ice : lime);
         r.text (x + 2, 3, label, carbon);
-        if (bindings[k] == CLAP_INVALID_ID) continue;
+        if (bindings[k] == MELODEE_SCREEN_NO_CONTROL) continue;
         const Param& p = parameter (bindings[k]);
         const char* const home[] = {"CORRUPT A", "CORRUPT B", "CLOCK DIV"};
         const char* const cell[] = {"STEP CV", "LENGTH", "CORRUPT"};
@@ -562,14 +562,14 @@ void Screen::footer (Raster& r) const
         const float norm = (live[p.id] - p.min) / (p.max - p.min);
         r.box (x, 26, width, 1, rule);
         r.box (x, 26, int (std::lround (norm * width)), 1, k == 1 ? ice : lime);
-        if (pots[k].position >= 0 && !pots[k].engaged)
-            r.frame (x + pots[k].position * (width - 1) / 127 - 1, 24, 3, 4, light);
+        if (pots[k] >= 0 && !potsLive[k])
+            r.frame (x + pots[k] * (width - 1) / 127 - 1, 24, 3, 4, light);
     }
 }
 
-bool Screen::paint (const melodee_screen_canvas_t& c)
+bool Screen::paint (const melodee_screen_frame_t& c)
 {
-    const bool whole = first || c.whole;
+    const bool whole = first || c.redraw_all != 0;
     bool params = false, knobsMoved = false;
     for (uint32_t i = 0; i < paramCount; ++i)
     {
@@ -580,8 +580,10 @@ bool Screen::paint (const melodee_screen_canvas_t& c)
     }
     for (int k = 0; k < 3; ++k)
     {
-        knobsMoved |= pots[k].engaged != c.knobs[k].engaged || pots[k].position != c.knobs[k].position;
-        pots[k] = c.knobs[k];
+        const bool liveNow = c.pots_live[k] != 0;
+        knobsMoved |= potsLive[k] != liveNow || pots[k] != c.pots[k];
+        pots[k] = c.pots[k];
+        potsLive[k] = liveNow;
     }
     const auto next = feed.heads.load (std::memory_order_acquire);
     bool moved = next != heads;
@@ -592,16 +594,17 @@ bool Screen::paint (const melodee_screen_canvas_t& c)
         if (serial != hits[s])
         {
             hits[s] = serial;
-            hitAt[s] = c.now_ms;
+            hitAt[s] = c.time_ms;
         }
-        const auto age = c.now_ms - hitAt[s];
+        const auto age = c.time_ms - hitAt[s];
         const int level = serial && age < 160 ? 4 - int (age / 40) : 0;
         moved |= flash[s] != level;
         flash[s] = level;
     }
     const bool content = whole || changed || params;
-    const bool helpChanged = shift != c.shift;
-    shift = c.shift;
+    const bool shiftNow = c.shift != 0;
+    const bool helpChanged = shift != shiftNow;
+    shift = shiftNow;
     const int nextFrame = orbitFrame (c);
     const bool turned = nextFrame != ringFrame;
     ringFrame = nextFrame;

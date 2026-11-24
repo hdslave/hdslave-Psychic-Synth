@@ -42,8 +42,8 @@ int tailNotices = 0;
 bool offerTail = true; // false: a host without clap.tail (testTailNotices)
 const void* hostExtension (const clap_host*, const char* id)
 {
-    static const clap_host_melodee_screen screen { [] (const clap_host*) { ++paints; } };
-    if (std::strcmp (id, CLAP_EXT_MELODEE_SCREEN_HOST) == 0) return &screen;
+    static const melodee_screen_host_t screen { [] (const void*, uint32_t) { ++paints; } };
+    if (std::strcmp (id, MELODEE_SCREEN_CLAP_HOST) == 0) return &screen;
     static const clap_host_log log { [] (const clap_host*, clap_log_severity s, const char* m) { std::printf ("  [plug-in log %d] %s\n", (int) s, m); } };
     static const clap_host_params params { [] (const clap_host*, clap_param_rescan_flags f) { rescans += (f & CLAP_PARAM_RESCAN_VALUES) != 0; },
                                            [] (const clap_host*, clap_id, clap_param_clear_flags) {}, [] (const clap_host*) { ++flushes; } };
@@ -2318,21 +2318,21 @@ void testUnquantizedKeys()
 void testScreen()
 {
     Instance a;
-    const auto* screen = static_cast<const clap_plugin_melodee_screen*> (a.plugin->get_extension (a.plugin, CLAP_EXT_MELODEE_SCREEN));
+    const auto* screen = static_cast<const melodee_screen_t*> (a.plugin->get_extension (a.plugin, MELODEE_SCREEN_CLAP));
     CHECK (screen);
     if (!screen) return;
     constexpr int stride = 327;
     constexpr uint32_t guard = 0x13579bdf;
     std::vector<uint32_t> pixels (stride * 218, guard);
-    melodee_screen_canvas_t canvas {};
-    canvas.width = 320; canvas.height = 218; canvas.stride = stride; canvas.pixels = pixels.data(); canvas.now_ms = 1000;
-    for (auto& k : canvas.knobs) k = {-1, true};
-    auto paint = [&] (bool whole = false) { canvas.whole = whole; return screen->paint (a.plugin, &canvas); };
+    melodee_screen_frame_t canvas {};
+    canvas.width = 320; canvas.height = 218; canvas.stride = stride; canvas.area = MELODEE_SCREEN_PAGE; canvas.pixels = pixels.data(); canvas.time_ms = 1000;
+    for (int k = 0; k < 3; ++k) canvas.pots[k] = -1, canvas.pots_live[k] = 1;
+    auto paint = [&] (bool whole = false) { canvas.redraw_all = whole ? 1u : 0u; return screen->draw (a.plugin, &canvas); };
     auto key = [&] (uint32_t kind, int v = 1) {
-        const melodee_screen_input_t input {kind, v, false};
+        const melodee_screen_input_t input {kind, v, 0};
         return screen->input (a.plugin, &input);
     };
-    auto knobs = [&] { std::vector<clap_id> ids (3); screen->knobs (a.plugin, ids.data()); return ids; };
+    auto knobs = [&] { std::vector<uint32_t> ids (3); screen->controls (a.plugin, ids.data()); return ids; };
     auto pixel = [&] (int x, int y) { return pixels[y*stride+x]; };
     CHECK (paint (true) && !paint());
     for (int y = 0; y < 218; ++y)
@@ -2358,7 +2358,7 @@ void testScreen()
     const auto rest = pixels;
     const int asked = paints;
     CHECK (!paint() && paints > asked);
-    canvas.now_ms += 500;
+    canvas.time_ms += 500;
     CHECK (paint());
     const auto quarter = pixels;
     int changedPixels = 0;
@@ -2374,10 +2374,10 @@ void testScreen()
     CHECK (paint (true) && pixels == quarter);
     position (60,0);
     CHECK (paint() && pixels == rest);
-    canvas.now_ms += 500;
+    canvas.time_ms += 500;
     CHECK (paint() && pixels != rest && pixels != quarter);
     const auto halfBeat = pixels;
-    canvas.now_ms += 500;
+    canvas.time_ms += 500;
     CHECK (paint() && pixels == quarter);
     position (120,-3.5);
     CHECK (paint() && pixels == halfBeat);
@@ -2388,9 +2388,9 @@ void testScreen()
     canvas.playing = false;
     CHECK (paint() && pixels == rest);
     const int stoppedPaints = paints;
-    canvas.now_ms += 1000;
+    canvas.time_ms += 1000;
     CHECK (!paint() && paints == stoppedPaints);
-    CHECK (key (MELODEE_SCREEN_NUDGE,-1) && a.loadPreset ("default"));
+    CHECK (key (MELODEE_SCREEN_STEP,-1) && a.loadPreset ("default"));
     a.setup ({});
     const auto emptyState = saveState (a);
     CHECK (key (MELODEE_SCREEN_PUSH));
@@ -2403,7 +2403,7 @@ void testScreen()
     CHECK (told.of (a.id ("Bits 1")) == std::vector<double> {108});
     CHECK (key (MELODEE_SCREEN_WHEEL,8));
     CHECK ((knobs() == std::vector<clap_id> {a.id ("Seq 2 CV 1"),a.id ("Length 2"),a.id ("Corrupt 2")}));
-    CHECK (key (MELODEE_SCREEN_WHEEL,-8) && key (MELODEE_SCREEN_NUDGE,-1));
+    CHECK (key (MELODEE_SCREEN_WHEEL,-8) && key (MELODEE_SCREEN_STEP,-1));
 
     // Save, then edit before the next audio block. Even a flush in between must preserve that order.
     CHECK (a.loadPreset ("default"));
@@ -2411,7 +2411,7 @@ void testScreen()
     CHECK (key (MELODEE_SCREEN_WHEEL,2) && key (MELODEE_SCREEN_PUSH) && key (MELODEE_SCREEN_PUSH));
     a.params->flush (a.plugin,nullptr,&told.out);
     a.setup ({});
-    CHECK (a.value ("Bits 1") == 108 && key (MELODEE_SCREEN_NUDGE,-1));
+    CHECK (a.value ("Bits 1") == 108 && key (MELODEE_SCREEN_STEP,-1));
     CHECK (paint());
     constexpr auto marked = 0xffa20d65u;
     constexpr int markX = 48+23, markY = 102+19+2;
@@ -2440,7 +2440,7 @@ void testScreen()
     a.render (12001,128,l,r,from0);
     before = paints;
     CHECK (paint() && paints > before);
-    canvas.now_ms += 250;
+    canvas.time_ms += 250;
     paint();
     constexpr auto restingHead = 0xff211a35u;
     CHECK (pixel (82,137) == restingHead && pixel (62,158) == restingHead);
@@ -2452,13 +2452,13 @@ void testScreen()
     a.setup ({{"Length 1",1},{"Length 2",3},{"Chain Seq",1},{"Clock 2",0}});
     a.render (1,1,l,r,[] (uint64_t) { return Transport {true,120,1}; });
     CHECK (paint());
-    canvas.now_ms += 250;
+    canvas.time_ms += 250;
     paint();
     CHECK (pixel (82,158) == restingHead && pixel (94,158) == restingHead);
 
     CHECK (a.loadPreset ("default"));
     a.setup ({});
-    CHECK (key (MELODEE_SCREEN_NUDGE) && key (MELODEE_SCREEN_WHEEL,3));
+    CHECK (key (MELODEE_SCREEN_STEP) && key (MELODEE_SCREEN_WHEEL,3));
     CHECK (knobs()[0] == CLAP_INVALID_ID);
     // Trigger asks the host to wake up. A press queued while the host slept (no audio ran) still fires on waking:
     // its age is counted in frames rendered, not wall time, so the sleep below does not expire it.
@@ -2485,7 +2485,7 @@ void testScreen()
             reached.insert (reached.end(),ids.begin(),ids.end());
             key (MELODEE_SCREEN_WHEEL,1);
         }
-        if (g<12) CHECK (key (MELODEE_SCREEN_NUDGE));
+        if (g<12) CHECK (key (MELODEE_SCREEN_STEP));
     }
     for (uint32_t n=0; n<a.params->count (a.plugin); ++n)
     {
@@ -2494,7 +2494,7 @@ void testScreen()
         if (a.text (info.name,1)!="Pressed")
             CHECK (std::find (reached.begin(),reached.end(),info.id)!=reached.end());
     }
-    CHECK (!key (MELODEE_SCREEN_NUDGE));
+    CHECK (!key (MELODEE_SCREEN_STEP));
 }
 
 // A page press queued while the host slept fires once on waking, at either device rate (its 500 ms of grace is
@@ -2504,19 +2504,19 @@ void testScreenPressSleep()
     for (double rate : { 44100.0, 48000.0 })
     {
         Instance a (rate);
-        const auto* screen = static_cast<const clap_plugin_melodee_screen*> (a.plugin->get_extension (a.plugin, CLAP_EXT_MELODEE_SCREEN));
+        const auto* screen = static_cast<const melodee_screen_t*> (a.plugin->get_extension (a.plugin, MELODEE_SCREEN_CLAP));
         CHECK (screen != nullptr);
         if (screen == nullptr)
             continue;
         auto key = [&] (uint32_t kind, int v = 1) {
-            const melodee_screen_input_t input { kind, v, false };
+            const melodee_screen_input_t input { kind, v, 0 };
             return screen->input (a.plugin, &input);
         };
         a.setup ({});
-        CHECK (key (MELODEE_SCREEN_NUDGE) && key (MELODEE_SCREEN_WHEEL, 3));
-        std::vector<clap_id> ids (3);
-        screen->knobs (a.plugin, ids.data());
-        CHECK (ids[0] == CLAP_INVALID_ID); // a button's row: Trigger
+        CHECK (key (MELODEE_SCREEN_STEP) && key (MELODEE_SCREEN_WHEEL, 3));
+        std::vector<uint32_t> ids (3);
+        screen->controls (a.plugin, ids.data());
+        CHECK (ids[0] == MELODEE_SCREEN_NO_CONTROL); // a button's row: Trigger
         CHECK (key (MELODEE_SCREEN_PUSH));
         std::this_thread::sleep_for (std::chrono::milliseconds (520)); // the sleeping host: no process calls
         std::vector<float> l, r;

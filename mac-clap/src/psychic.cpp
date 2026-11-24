@@ -53,7 +53,7 @@ struct Plugin
     // thread's loads: a load that lands while a block plays wins over what the engine changed in that block.
     std::atomic<bool> exchange { false };
     std::atomic<uint32_t> loads { 0 };
-    const clap_host_melodee_screen* hostScreen = nullptr;
+    const melodee_screen_host_t* hostScreen = nullptr;
     const clap_host_params* hostParams = nullptr;
     std::atomic<uint32_t> bufferRevision { 0 };
     uint32_t paintedRevision = 0;
@@ -93,9 +93,9 @@ bool tryLockAudio (Plugin& p)
 }
 void unlock (Plugin& p) { p.exchange.store (false, std::memory_order_release); }
 
-void requestPaint (Plugin& p)
+void requestPaint (Plugin& p, uint32_t flags = 0)
 {
-    if (p.hostScreen && p.hostScreen->request_paint) p.hostScreen->request_paint (p.host);
+    if (p.hostScreen && p.hostScreen->redraw) p.hostScreen->redraw (p.host, flags);
 }
 
 uint64_t steadyMs()
@@ -540,7 +540,7 @@ const clap_plugin_note_ports noteExtension { noteCount, noteGet };
 bool pluginInit (const clap_plugin* plugin)
 {
     auto& p = of (plugin);
-    p.hostScreen = static_cast<const clap_host_melodee_screen*> (p.host->get_extension (p.host, CLAP_EXT_MELODEE_SCREEN_HOST));
+    p.hostScreen = static_cast<const melodee_screen_host_t*> (p.host->get_extension (p.host, MELODEE_SCREEN_CLAP_HOST));
     p.hostParams = static_cast<const clap_host_params*> (p.host->get_extension (p.host, CLAP_EXT_PARAMS));
     for (uint32_t i = 0; i < paramCount; ++i)
     {
@@ -681,10 +681,10 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
     return CLAP_PROCESS_CONTINUE;
 }
 
-bool screenPaint (const clap_plugin* plugin, const melodee_screen_canvas_t* c)
+bool screenDraw (const void* plugin, const melodee_screen_frame_t* c)
 {
-    if (!c || !c->pixels || c->width != hdui::width || c->height != hdui::height || c->stride < c->width) return false;
-    auto& p = of (plugin);
+    if (!plugin || !c || !c->pixels || c->area != MELODEE_SCREEN_PAGE || c->width != hdui::width || c->height != hdui::height || c->stride < c->width) return false;
+    auto& p = of (static_cast<const clap_plugin*> (plugin));
     if (p.paintedRevision != p.bufferRevision.load (std::memory_order_acquire))
     {
         std::array<float, seqStateCount> saved;
@@ -700,10 +700,10 @@ bool screenPaint (const clap_plugin* plugin, const melodee_screen_canvas_t* c)
     return drew;
 }
 
-bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* input)
+bool screenInput (const void* plugin, const melodee_screen_input_t* input)
 {
-    if (!input || input->kind > MELODEE_SCREEN_NUDGE) return false;
-    auto& p = of (plugin);
+    if (!plugin || !input || input->kind > MELODEE_SCREEN_STEP) return false;
+    auto& p = of (static_cast<const clap_plugin*> (plugin));
     Screen::Edit edit;
     if (!p.screen.input (*input, edit)) return false;
     if (edit.id != CLAP_INVALID_ID)
@@ -730,12 +730,16 @@ bool screenInput (const clap_plugin* plugin, const melodee_screen_input_t* input
         }
         if (p.host->request_process) p.host->request_process (p.host);
     }
-    requestPaint (p);
+    requestPaint (p, edit.id != CLAP_INVALID_ID ? MELODEE_SCREEN_RUN : 0);
     return true;
 }
 
-void screenKnobs (const clap_plugin* plugin, clap_id ids[3]) { of (plugin).screen.knobs (ids); }
-const clap_plugin_melodee_screen screenExtension { screenPaint, screenInput, screenKnobs };
+void screenControls (const void* plugin, uint32_t ids[3])
+{
+    if (!plugin || !ids) return;
+    of (static_cast<const clap_plugin*> (plugin)).screen.knobs (ids);
+}
+const melodee_screen_t screenExtension { screenDraw, screenInput, screenControls };
 
 } // namespace
 } // namespace psychic
@@ -749,7 +753,7 @@ namespace
 
 const void* pluginExtension (const clap_plugin*, const char* id)
 {
-    if (std::strcmp (id, CLAP_EXT_MELODEE_SCREEN) == 0) return &screenExtension;
+    if (std::strcmp (id, MELODEE_SCREEN_CLAP) == 0) return &screenExtension;
     if (std::strcmp (id, CLAP_EXT_HDSLAVE_TILES) == 0) return &tilesExtension;
     if (std::strcmp (id, CLAP_EXT_PARAMS) == 0) return &paramsExtension;
     if (std::strcmp (id, CLAP_EXT_STATE) == 0) return &stateExtension;
