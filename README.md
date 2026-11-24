@@ -10,7 +10,7 @@ Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melo
 
 Its sequencers lock tightly to the host transport and beat grid. Under **hdslaveOS**, Psychic draws its animated **Contact Sheet** screen comparing saved and live steps side by side with direct per-cell gate and voltage editing.
 
-Version 0.2.3. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
+Version 0.2.4. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
 (`clap_check`), but nobody has played it on the device yet.
 
 ## Contact Sheet on the MPC Sample
@@ -33,7 +33,7 @@ On the card, a filled punch is an open gate. The small bar beside it shows volta
 mark the write heads, and bars below the cells mark the play heads. Cells beyond the lane length are dimmed.
 **Plus** opens the parameter pages. Use **Minus/Plus** to move between groups and hold **Shift** for the control guide.
 
-The page uses the hdslaveOS screen extension for Melodee by Kerem Kiliç (Ellic Studio).
+The custom screen uses `melodee.screen/1` on Melodee 0.7 and hdslaveOS based on it. Open Edit on the plug-in track or select PANEL on Stage. The SDK is by Kerem Kiliç (Ellic Studio).
 The bitmap typeface is Departure Mono. [Font license](licenses/OFL-departure-mono.txt)
 
 ## Signal flow
