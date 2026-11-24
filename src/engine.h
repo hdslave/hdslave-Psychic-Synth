@@ -218,7 +218,9 @@ struct Decimator
 
 // --- Quantizer ----------------------------------------------------------------------------------------------------
 // The nearest note of a mode to `semitones` above the root (ties go down). Unquantized passes it as it is.
-inline float quantizeSemitones (float semitones, int mode)
+// Keep this scale search out of the caller. In the MPC build, inlining it changes how the compiler fuses the
+// oscillator pitch calculations after manual Advance, and the resulting phase drifts from the original sound.
+[[gnu::noinline]] inline float quantizeSemitones (float semitones, int mode)
 {
     const uint16_t mask = scaleMask[mode];
     if (mask == 0)

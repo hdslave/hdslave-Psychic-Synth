@@ -10,7 +10,7 @@ Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melo
 
 Its sequencers lock tightly to the host transport and beat grid. Under **hdslaveOS**, Psychic draws its animated **Contact Sheet** screen comparing saved and live steps side by side with direct per-cell gate and voltage editing.
 
-Version 0.2.4. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
+Version 0.2.5. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
 (`clap_check`), but nobody has played it on the device yet.
 
 ## Contact Sheet on the MPC Sample
@@ -316,7 +316,9 @@ across its turn, chained moves and the buffer, Clock 2 with Swing, notes, step p
 with Run off as the keyboard), the keyboard Unquantized with Run switched off and on, each Order, and two-bar loops as Melodee plays them. Work meant to keep the
 sound, such as a speed-up, must leave every hash as it is. A change meant to change the sound updates them with
 `make fingerprint-update` (run inside the build image). The hashes hold for Melodee's build image and these compiler
-flags.
+flags. Version 0.2.5 restores the 0.2.1 oscillator pitch rounding when Advance moves the stopped sequencers.
+All 59 fingerprints match that reference, including the four random patches that diverged in 0.2.2.
+The later panic, state-load and transport fixes keep their own host tests.
 
 ## Install
 
