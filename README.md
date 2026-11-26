@@ -19,7 +19,7 @@ Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melo
 
 Its sequencers lock tightly to the host transport and beat grid. Under **hdslaveOS**, Psychic draws its animated **Contact Sheet** screen comparing saved and live steps side by side with direct per-cell gate and voltage editing.
 
-Version 0.2.5. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
+Version 0.2.6. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
 (`clap_check`), but nobody has played it on the device yet.
 
 ## Contact Sheet on the MPC Sample
@@ -141,7 +141,7 @@ The public CLAP parameter names and their panel equivalents are listed below.
 | Clock 2 | patch: CLOCK 2 input | Clock 1 (normalled), or a grid of its own (1/2 … 1/64): polyrhythms |
 | Mod VCO > Fold | patch: M VCO out to VCW FOLD | ±100 %: the Mod VCO moves Fold by up to a whole turn |
 | Mod VCO > Cutoff | patch: M VCO out to CUTOFF | ±100 %: up to ±5 octaves |
-| Drone | patch: a voltage into both VCA CV inputs | Off / On: the VCAs held open |
+| Drone | patch: a voltage into both VCA CV inputs | Off / On: the VCAs held open (hdslaveOS's silence shuts them until a strike, Drone turned on again, or a preset or state loaded) |
 | Seq 1 CV 1–8, Seq 2 CV 1–8 | the bits' CVs | ±5.00 V |
 
 ### MIDI notes and pads
@@ -310,7 +310,11 @@ The tests load the plug-in through the CLAP API and check:
   the pad's frame; the same output at every block size;
 - the host's silence: a choke (any key) and CC 120/123 at 0 stopping a held-open Drone and the longest EG2 tail
   within a block, the next step striking again, a note and a choke on one frame in the order sent, and a note off,
-  CC 121 and CC 120 at 64 leaving what rings untouched;
+  CC 121 and CC 120 at 64 leaving what rings untouched; a silence while Drone is off (hdslaveOS's Stop sends CC 123)
+  leaving Drone turned on later, a drone preset and a drone state sounding at once, to the bit as without it; a
+  silenced Drone opening again when turned off and on, or when a drone state is loaded; and a drone preset or state
+  loaded while hdslaveOS's idle gate lets it sleep (modelled block by block) sounding from the next block, to the bit
+  as in an instance run every block (a load asks the host to run it);
 - the reported latency (the decimator's group delay, measured by impulse through it at both inner phases) and
   tail (EG2 ringing to exact zero, endless with Drone), and the host told when Drone or EG2 Decay changes the
   tail — by event, by flush and by a preset load, and not by an unrelated knob or the same value again;
@@ -327,7 +331,8 @@ sound, such as a speed-up, must leave every hash as it is. A change meant to cha
 `make fingerprint-update` (run inside the build image). The hashes hold for Melodee's build image and these compiler
 flags. Version 0.2.5 restores the 0.2.1 oscillator pitch rounding when Advance moves the stopped sequencers.
 All 59 fingerprints match that reference, including the four random patches that diverged in 0.2.2.
-The later panic, state-load and transport fixes keep their own host tests.
+The later panic, state-load and transport fixes keep their own host tests. Version 0.2.6 (the Drone after a silence, and a
+load waking a sleeping instance) leaves all 59 fingerprints as they were.
 
 ## Install
 

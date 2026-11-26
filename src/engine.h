@@ -304,6 +304,10 @@ public:
                 break;
             case clock2: clocks[1].regridWanted = true; break;
             case run: case quantize: updateShift(); break;
+            case drone: // Drone turned on holds the VCAs open, whatever silence came before (silence())
+                if (v >= 0.5f)
+                    silenced = false;
+                break;
             case bits1: lanes[0].bits = (uint8_t) v; break;
             case bits2: lanes[1].bits = (uint8_t) v; break;
             case length1: lanes[0].length = std::max (1, (int) v); break;
@@ -379,8 +383,10 @@ public:
     }
 
     // The host's silence (a choke, All Sound Off, All Notes Off): both envelopes stop and the VCAs shut, Drone
-    // notwithstanding, until the next strike (a step that hits, Trigger, a note or pad) opens them again. The
-    // decimator flushes what it holds over its next dozen frames, then the output is exact silence.
+    // notwithstanding, until the next strike (a step that hits, Trigger, a note or pad), Drone turned on, or a state
+    // or preset loaded opens them again. (hdslaveOS sends All Notes Off on every Stop, so a silence while Drone is
+    // off is common: it must not keep a Drone turned on later shut.) The decimator flushes what it holds over its
+    // next dozen frames, then the output is exact silence.
     [[gnu::noinline]] void silence()
     {
         eg1.silence();
@@ -389,7 +395,8 @@ public:
     }
 
     // A state or preset was loaded over whatever was sounding: the knobs are where the load put them at once
-    // (no easing to them across the next millisecond).
+    // (no easing to them across the next millisecond), and it sounds as loaded: a drone patch drones, as in an
+    // instance that was never silenced.
     void settle()
     {
         if (dirty)
@@ -397,6 +404,7 @@ public:
         for (int i = 0; i < smoothed; ++i)
             smooth[i] = target[i];
         moving = false;
+        silenced = false;
     }
 
     // A value the engine set itself (Bit Flip, Bit Shift, Corrupt, Recall), once each: the host must hear them as the

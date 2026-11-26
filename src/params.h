@@ -10,7 +10,7 @@
 #include <strings.h>
 
 #ifndef PSYCHIC_VERSION
-#define PSYCHIC_VERSION "0.2.5"
+#define PSYCHIC_VERSION "0.2.6"
 #endif
 
 namespace psychic

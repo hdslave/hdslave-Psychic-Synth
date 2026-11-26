@@ -396,7 +396,9 @@ bool readAll (const clap_istream* s, void* data, uint64_t size)
 }
 
 // Every value at once, and the buffer if `buffer` is given, from the main thread (a state or a preset loaded). Not
-// processing, the engine takes them now; otherwise at the next block.
+// processing, the engine takes them now; otherwise at the next block, which it asks the host for: a host that let the
+// plug-in sleep (hdslaveOS, silent and no key held) would otherwise run it only at the next note, knob or Play, and a
+// drone preset would stay silent until then.
 void loadAll (Plugin& p, const float* values, const float* buffer = nullptr, bool full = false)
 {
     markTail (p, ParamId::eg2Decay, p.values[paramIndex (ParamId::eg2Decay)].load (std::memory_order_relaxed),
@@ -423,6 +425,8 @@ void loadAll (Plugin& p, const float* values, const float* buffer = nullptr, boo
     p.loads.fetch_add (1, std::memory_order_release);
     p.mainChanged.store (true, std::memory_order_release);
     unlock (p);
+    if (p.active && p.host->request_process != nullptr)
+        p.host->request_process (p.host);
     if (! p.active)
     {
         for (uint32_t i = 0; i < paramCount; ++i)

@@ -147,10 +147,10 @@ struct Instance
     std::map<std::string, clap_id> ids;
     double rate = 48000.0;
 
-    explicit Instance (double sampleRate = 48000.0, uint32_t maxFrames = 4096) : rate (sampleRate)
+    explicit Instance (double sampleRate = 48000.0, uint32_t maxFrames = 4096, const clap_host* with = &host) : rate (sampleRate)
     {
         const auto* d = factory->get_plugin_descriptor (factory, 0);
-        plugin = factory->create_plugin (factory, &host, d->id);
+        plugin = factory->create_plugin (factory, with, d->id);
         CHECK (plugin != nullptr && plugin->init (plugin));
         params = static_cast<const clap_plugin_params*> (plugin->get_extension (plugin, CLAP_EXT_PARAMS));
         state = static_cast<const clap_plugin_state*> (plugin->get_extension (plugin, CLAP_EXT_STATE));
@@ -596,6 +596,188 @@ void testPanic()
         CHECK (silentFrom (l, 1280 + 128));
         both (true, l);
         CHECK (soundsIn (l, 1280, 9600));
+    }
+}
+
+// A silence while Drone is off (hdslaveOS sends CC 123 at 0 on every Stop; CC 120 and the chokes come with its
+// silence) keeps nothing shut that a Drone needs later: Drone turned on afterwards, or a drone preset or state loaded,
+// opens the VCAs at once, to the bit as in an instance never silenced. A silence while Drone is on still holds until a
+// strike (testPanic), but Drone turned off and on again, or a drone state loaded, opens them again.
+void testDroneAfterSilence()
+{
+    std::vector<float> l, r, ref;
+    auto soundsIn = [] (const std::vector<float>& x, size_t from, size_t to) {
+        for (size_t i = from; i < to && i < x.size(); ++i)
+            if (std::fabs (x[i]) > 0.005f)
+                return true;
+        return false;
+    };
+    auto silencer = [] (int s, Events& e) {
+        if (s == 1) e.midi (0, 0xb0, 123, 0);                       // Stop's All Notes Off
+        else if (s == 2) e.midi (0, 0xb5, 120, 0);                  // All Sound Off
+        else if (s == 3) e.note (0, CLAP_EVENT_NOTE_CHOKE, 60, 0.0); // the CLAP dialect's choke
+    };
+    // Drone off, stopped: a silence at frame 1280 (0: none), Drone turned on at 4864.
+    auto turnedOn = [&] (int s, std::vector<float>& out) {
+        Instance a;
+        a.render (14400, 128, out, r, stopped, [&] (uint64_t at, uint32_t, Events& e) {
+            if (at == 1280) silencer (s, e);
+            if (at == 4864) e.param (0, a.id ("Drone"), 1.0);
+        });
+    };
+    turnedOn (0, ref);
+    CHECK (soundsIn (ref, 6000, 14400));
+    for (int s : { 1, 2, 3 })
+    {
+        turnedOn (s, l);
+        CHECK (l == ref);
+    }
+    // The same silence, then a drone preset, or a drone state, loaded between blocks (the main thread's load).
+    Instance droning;
+    droning.setup ({ { "Drone", 1.0 }, { "Cutoff", 0.8 } });
+    const auto droneState = saveState (droning);
+    auto loaded = [&] (int s, bool preset, std::vector<float>& out) {
+        Instance a;
+        a.render (2560, 128, l, r, stopped, [&] (uint64_t at, uint32_t, Events& e) {
+            if (at == 1280) silencer (s, e);
+        });
+        CHECK (preset ? a.loadPreset ("corrupt-drone") : loadState (a, droneState));
+        a.render (9600, 128, out, r, stopped);
+    };
+    for (bool preset : { true, false })
+    {
+        loaded (0, preset, ref);
+        CHECK (soundsIn (ref, 2000, 9600));
+        for (int s : { 1, 2, 3 })
+        {
+            loaded (s, preset, l);
+            CHECK (l == ref);
+        }
+    }
+    // Drone on and silenced (it holds), then Drone off and on again: it sounds from there.
+    {
+        Instance a;
+        a.setup ({ { "Drone", 1.0 } });
+        a.render (14400, 128, l, r, stopped, [&] (uint64_t at, uint32_t, Events& e) {
+            if (at == 1280) silencer (2, e);
+            if (at == 4864) e.param (0, a.id ("Drone"), 0.0);
+            if (at == 6400) e.param (0, a.id ("Drone"), 1.0);
+        });
+        CHECK (! soundsIn (l, 1280 + 128, 6400) && soundsIn (l, 8000, 14400));
+    }
+    // Drone on and silenced, then a drone state loaded: it sounds as loaded.
+    {
+        Instance a;
+        a.setup ({ { "Drone", 1.0 } });
+        a.render (4800, 128, l, r, stopped, [&] (uint64_t at, uint32_t, Events& e) {
+            if (at == 1280) silencer (1, e);
+        });
+        CHECK (! soundsIn (l, 1280 + 128, 4800));
+        CHECK (loadState (a, droneState));
+        a.render (9600, 128, l, r, stopped);
+        CHECK (soundsIn (l, 2000, 9600));
+    }
+}
+
+// hdslaveOS's idle gate for an instrument (src/melodee/plugin/idle_gate.h, as plugin_rack.cpp and clap_instance.cpp run
+// it), with the song stopped and no key held: before each 128-frame block the plug-in is skipped once its output has
+// been under -100 dB for half a second, unless something waits for it: MIDI or a value for that block, or its own
+// request_process (the host clears the wish as a block starts, so one asked for in between runs the next block).
+// Skipped, it is not called at all. A preset or state load on the main thread is none of these.
+struct GatedHost
+{
+    clap_host host;
+    bool asked = false;
+    GatedHost()
+        : host { CLAP_VERSION, this, "Psychic gated test host", "tests", "", "1", hostExtension, [] (const clap_host*) {},
+                 [] (const clap_host* h) { static_cast<GatedHost*> (h->host_data)->asked = true; }, [] (const clap_host*) {} }
+    {
+    }
+};
+// `frames` stopped through `a` in 128-frame blocks, `events` adding a block's events; with `gate` (the host `a` was made
+// with, and its quiet count, kept across calls), through the idle gate, `skipped` counting the blocks it slept.
+void gatedRender (Instance& a, uint32_t frames, std::vector<float>& out, GatedHost* gate, uint32_t& quiet, int& skipped,
+                  const std::function<void (uint64_t, Events&)>& events = {})
+{
+    out.assign (frames, 0.0f);
+    std::vector<float> right (frames, 0.0f);
+    const uint32_t needed = (uint32_t) std::lround (0.5 * a.rate);
+    for (uint32_t at = 0; at < frames; at += 128)
+    {
+        const uint32_t n = std::min<uint32_t> (128, frames - at);
+        Events e;
+        if (events)
+            events (at, e);
+        e.sort();
+        if (gate != nullptr)
+        {
+            const bool waiting = gate->asked || ! e.list.empty();
+            if (waiting)
+                quiet = 0;
+            else if (quiet >= needed)
+            {
+                ++skipped;
+                continue;
+            }
+            gate->asked = false;
+        }
+        clap_event_transport tr {};
+        tr.header = { sizeof (clap_event_transport), 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_TRANSPORT, 0 };
+        tr.flags = CLAP_TRANSPORT_HAS_TEMPO | CLAP_TRANSPORT_HAS_BEATS_TIMELINE;
+        tr.tempo = 120.0;
+        float* outs[2] = { out.data() + at, right.data() + at };
+        clap_audio_buffer buffer {};
+        buffer.data32 = outs;
+        buffer.channel_count = 2;
+        OutEvents ignored;
+        clap_process p {};
+        p.steady_time = -1;
+        p.frames_count = n;
+        p.transport = &tr;
+        p.audio_outputs = &buffer;
+        p.audio_outputs_count = 1;
+        p.in_events = &e.in;
+        p.out_events = &ignored.out;
+        CHECK (a.plugin->process (a.plugin, &p) != CLAP_PROCESS_ERROR);
+        bool loud = false;
+        for (uint32_t i = 0; i < n; ++i)
+            loud |= std::fabs (outs[0][i]) > 1e-5f || std::fabs (outs[1][i]) > 1e-5f;
+        quiet = loud ? 0 : std::min (quiet + n, needed);
+    }
+}
+
+// A drone preset or state loaded while hdslaveOS lets the plug-in sleep (after a Stop's CC 123 with Drone off: silent,
+// no key held) drones from the next block, as in an instance run every block: the load asks the host to run it.
+void testLoadWakesSleeping()
+{
+    std::vector<float> l, ref;
+    auto soundsIn = [] (const std::vector<float>& x) {
+        for (float v : x)
+            if (std::fabs (v) > 0.005f)
+                return true;
+        return false;
+    };
+    Instance droning;
+    droning.setup ({ { "Drone", 1.0 }, { "Cutoff", 0.8 } });
+    const auto droneState = saveState (droning);
+    for (bool preset : { true, false })
+    {
+        auto run = [&] (bool gated, std::vector<float>& after, int& skipped) {
+            GatedHost gate;
+            Instance a (48000.0, 4096, gated ? &gate.host : &host);
+            uint32_t quiet = 0;
+            gatedRender (a, 96000, l, gated ? &gate : nullptr, quiet, skipped, [] (uint64_t at, Events& e) {
+                if (at == 1280) e.midi (0, 0xb0, 123, 0); // Stop's All Notes Off, Drone off
+            });
+            CHECK (preset ? a.loadPreset ("corrupt-drone") : loadState (a, droneState));
+            gatedRender (a, 9600, after, gated ? &gate : nullptr, quiet, skipped);
+        };
+        int skipped = 0, none = 0;
+        run (false, ref, none);
+        run (true, l, skipped);
+        CHECK (skipped > 0); // it slept before the load
+        CHECK (soundsIn (ref) && soundsIn (l));
+        CHECK (l == ref);
     }
 }
 
@@ -2573,6 +2755,8 @@ int main (int argc, char** argv)
     testParameters();
     testState();
     testPanic();
+    testDroneAfterSilence();
+    testLoadWakesSleeping();
     testMidGridPlay();
     testSettleOnLoad();
     testHardening();
