@@ -29,6 +29,27 @@ const clap_plugin_descriptor descriptor {
     features,
 };
 
+// The pads as Melodee reads them from a plug-in's library (0.3.0): with this, a plug-in track on Psychic plays its pads
+// as drums, notes 36-51 (pads A01-A16) whatever the track's octave, key or scale, its Keys page names them, and - / +
+// move the bank (16 keys) instead of the octave: with Run on, Engine::note reads every bank as the same 16 step pads,
+// an octave a bank apart (with Run off every key is its own note). Kept in the binary by padsJson(), called from
+// pluginInit.
+[[gnu::used]] const char padMapJson[] =
+    "{\"pad_layout\":\"drums\",\"name\":\"hdslave Psychic\",\"levels\":{"
+    "\"s1b1\":{\"name\":\"S1 Bit 1\",\"note\":36},\"s1b2\":{\"name\":\"S1 Bit 2\",\"note\":37},"
+    "\"s1b3\":{\"name\":\"S1 Bit 3\",\"note\":38},\"s1b4\":{\"name\":\"S1 Bit 4\",\"note\":39},"
+    "\"s1b5\":{\"name\":\"S1 Bit 5\",\"note\":40},\"s1b6\":{\"name\":\"S1 Bit 6\",\"note\":41},"
+    "\"s1b7\":{\"name\":\"S1 Bit 7\",\"note\":42},\"s1b8\":{\"name\":\"S1 Bit 8\",\"note\":43},"
+    "\"s2b1\":{\"name\":\"S2 Bit 1\",\"note\":44},\"s2b2\":{\"name\":\"S2 Bit 2\",\"note\":45},"
+    "\"s2b3\":{\"name\":\"S2 Bit 3\",\"note\":46},\"s2b4\":{\"name\":\"S2 Bit 4\",\"note\":47},"
+    "\"s2b5\":{\"name\":\"S2 Bit 5\",\"note\":48},\"s2b6\":{\"name\":\"S2 Bit 6\",\"note\":49},"
+    "\"s2b7\":{\"name\":\"S2 Bit 7\",\"note\":50},\"s2b8\":{\"name\":\"S2 Bit 8\",\"note\":51}}}";
+const char* padsJson()
+{
+    const char* volatile json = padMapJson;
+    return json;
+}
+
 struct Plugin
 {
     clap_plugin clap {};
@@ -203,7 +224,7 @@ bool pushValue (const clap_output_events* out, uint32_t time, clap_id id, double
     return out->try_push (out, &back.header);
 }
 
-// One event: parameter values go to the engine at once; notes transpose (and, stopped, trigger) it. What it sends
+// One event: parameter values go to the engine at once; notes are pads (Engine::note: steps with Run on, the keyboard with Run off). What it sends
 // back goes at the event's time, or the block's last frame for an event stamped past the block.
 void handle (Plugin& p, const clap_event_header* e, const clap_output_events* out, uint32_t lastFrame)
 {
@@ -572,6 +593,7 @@ bool pluginInit (const clap_plugin* plugin)
     p.hostScreen = static_cast<const melodee_screen_host_t*> (p.host->get_extension (p.host, MELODEE_SCREEN_CLAP_HOST));
     p.hostParams = static_cast<const clap_host_params*> (p.host->get_extension (p.host, CLAP_EXT_PARAMS));
     p.hostTail = static_cast<const clap_host_tail*> (p.host->get_extension (p.host, CLAP_EXT_TAIL)); // may be absent
+    (void) padsJson();
     for (uint32_t i = 0; i < paramCount; ++i)
     {
         p.feed.preview[i].store (ScreenFeed::noEdit, std::memory_order_relaxed);
@@ -657,7 +679,7 @@ clap_process_status pluginProcess (const clap_plugin* plugin, const clap_process
 
     // Settings at the block's first frame come first, the transport after them: a setting the host sends with Play
     // is in place for what Play does. Buttons and notes at that frame come after the transport: they act on where
-    // the sequences are once it moved (a Reset with Play sticks; a note with Play transposes without playing).
+    // the sequences are once it moved (a Reset with Play sticks; a pad with Play sounds after Play placed the heads).
     const auto* in = process->in_events;
     const uint32_t count = in != nullptr ? in->size (in) : 0;
     const uint32_t last = frames > 0 ? frames - 1 : 0;

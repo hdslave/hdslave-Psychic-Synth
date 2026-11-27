@@ -10,7 +10,7 @@
 #include <strings.h>
 
 #ifndef PSYCHIC_VERSION
-#define PSYCHIC_VERSION "0.2.6"
+#define PSYCHIC_VERSION "0.3.0"
 #endif
 
 namespace psychic
@@ -92,12 +92,28 @@ constexpr float qtzFrom = 0.98f;
 inline float seqAmtScale (float k) { return k >= qtzFrom ? 1.0f : k / qtzFrom; }
 // EG attacks: decay-only on the panel, but a capacitor still takes a moment to charge: 1 ms.
 constexpr float attackSeconds = 0.001f;
-// MIDI notes transpose the quantized sequences (with Run off the unquantized ones too): this note leaves them where
-// they are (middle C).
+// With Run off, a note transposes the sequences by its distance from this one (middle C): pad A01 (36) is two
+// octaves down.
 constexpr int transposeNote = 60;
-// With Run on, the 16 notes from here are step pads: SEQ 1's bits 1-8, then SEQ 2's bits 1-8 (hdslaveOS's pads A01-A16
-// on a plug-in track at its default octave and key). Chained, that is the ring's 16 bits in order.
+// The 16 pads: notes 36-51 (hdslaveOS's pads A01-A16 on a plug-in track playing its pads as drums, which the drum map
+// in psychic.cpp asks for). With Run on they are step pads: SEQ 1's bits 1-8, then SEQ 2's bits 1-8 (chained, the
+// ring's 16 bits in order). With Run off every key is the keyboard's own note, as before 0.3.0.
 constexpr int firstStepNote = 36;
+constexpr int padSlots = 16;
+// A key as a pad (0.3.0): hdslaveOS's - / + move a drum track's bank 16 keys (B 52-67, C 68-83, D 84-99; below A the
+// same way down), and with Run on every bank plays the same 16 step pads an octave per bank apart: banks A-D 0, 1, 2
+// and 3 octaves up, clamped to two octaves down and three up. slot is the pad (0-15), semitones the bank's octaves.
+struct PadKey
+{
+    int slot, semitones;
+};
+inline PadKey padOf (int key)
+{
+    const int from = key - firstStepNote;
+    const int bank = from >= 0 ? from / padSlots : -((-from + padSlots - 1) / padSlots);
+    const int octaves = bank < -2 ? -2 : bank > 3 ? 3 : bank;
+    return { from - bank * padSlots, 12 * octaves };
+}
 
 inline const char* const offOn[] = { "Off", "On" };
 inline const char* const runChoices[] = { "Stop", "Run" };

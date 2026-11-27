@@ -277,7 +277,8 @@ public:
         for (auto& c : clocks)
             c = Clock {};
         for (auto& l : lanes)
-            l.play = -1, l.offset = 0, l.held = 0.0f, l.aligned = false, l.hit = false, l.previewAt = ~uint64_t (0), l.previewLevel = 0.0f;
+            l.play = -1, l.offset = 0, l.held = 0.0f, l.aligned = false, l.hit = false, l.previewAt = ~uint64_t (0), l.previewLevel = 0.0f, l.octaves = 0.0f;
+        laneShift[0] = laneShift[1] = cvShift;
         silenced = false;
         dirty = true;
         retarget();
@@ -361,16 +362,18 @@ public:
         }
     }
 
-    // A MIDI note. With Run on (the host playing or not), notes 36-51 are step pads (preview()). Every other note, and
-    // every note with Run off: transposes the sequences (the note's distance from middle C; Unquantized too, with Run
-    // off: see retarget and updateShift); while the sequencers are not running it also triggers both envelopes, at its
-    // velocity. A change of Run or Quantize reaches it through set() (dirty: the targets are worked out again at the
-    // next control tick, as for any knob).
+    // A MIDI note. With Run on (the host playing or not), every key is a step pad (preview()), read as a pad and its
+    // bank (padOf: hdslaveOS's - / + on the drum track move the bank, 16 keys): the pad's step, the bank's octaves up
+    // or down on the CV. With Run off, every key is the keyboard's own note, as before 0.3.0: it transposes the
+    // sequences by its distance from middle C (Unquantized too: see retarget and updateShift) and, the sequencers not
+    // running, triggers both envelopes at its velocity. A change of Run or Quantize reaches it through set() (dirty:
+    // the targets are worked out again at the next control tick, as for any knob).
     void note (int key, float velocity)
     {
-        if (knob[ParamId::run] >= 0.5f && key >= firstStepNote && key < firstStepNote + 16)
+        if (knob[ParamId::run] >= 0.5f)
         {
-            preview (key - firstStepNote, velocity);
+            const PadKey pad = padOf (key);
+            preview (pad.slot, velocity, (float) (pad.semitones / 12));
             return;
         }
         transpose = (float) (key - transposeNote);
@@ -549,6 +552,7 @@ private:
         bool hit = false;   // its last step was on (it triggered)
         uint64_t previewAt = ~uint64_t (0); // the frame (`now`) a step pad last gave its CV output a bit's CV
         float previewLevel = 0.0f;          // and that pad's velocity
+        float octaves = 0.0f;               // the bank of the pad whose CV `held` is, in octaves (0 after a step)
     };
     struct Clock
     {
@@ -673,6 +677,11 @@ private:
         if (! ((lanes[lane].bits >> bit) & 1))
             return false;
         l.held = lanes[lane].cv[bit];
+        if (l.octaves != 0.0f) // a pad's bank octave goes with the pad's CV
+        {
+            l.octaves = 0.0f;
+            laneShift[s] = cvShift;
+        }
         return true;
     }
 
@@ -812,8 +821,9 @@ private:
     // round the ring: both outputs take it. Both envelopes fire at the pad's velocity. Nothing else moves: no play or
     // write head, bit, CV or transposition, nothing the host must hear. The CV holds until that sequencer's next on
     // bit. Two pads on one frame giving one output a CV: the louder pad's wins (on a tie, the later); the envelopes
-    // keep the louder peak themselves.
-    void preview (int pad, float velocity)
+    // keep the louder peak themselves. `octaves`: the pad's bank (0.3.0), added to that CV output after the quantizer
+    // and the transposition (in every Quantize mode, through the same Seq Amt), held with the CV.
+    void preview (int pad, float velocity, float octaves)
     {
         const int lane = pad >> 3, bit = pad & 7;
         for (int s = 0; s < 2; ++s)
@@ -824,6 +834,8 @@ private:
             l.previewAt = now;
             l.previewLevel = velocity;
             l.held = lanes[lane].cv[bit];
+            l.octaves = octaves;
+            laneShift[s] = cvShift + octaves;
         }
         stepped();
         strikeLevel (velocity);
@@ -845,7 +857,13 @@ private:
     }
 
     // Run off with Quantize Unquantized: the note's distance from middle C, in octaves, added to the CVs (0 otherwise).
-    void updateShift() { cvShift = knob[ParamId::run] < 0.5f && scaleMask[(int) knob[ParamId::quantize]] == 0 ? transpose * (1.0f / 12.0f) : 0.0f; }
+    // laneShift: that and each output's pad bank octaves (0 but after a pad off bank A), what retarget adds.
+    void updateShift()
+    {
+        cvShift = knob[ParamId::run] < 0.5f && scaleMask[(int) knob[ParamId::quantize]] == 0 ? transpose * (1.0f / 12.0f) : 0.0f;
+        laneShift[0] = cvShift + lanes[0].octaves;
+        laneShift[1] = cvShift + lanes[1].octaves;
+    }
 
     // A sequencer's CV output in octaves (1 V/octave): its held CV through CV Range and the quantizer, transposed
     // by the last MIDI note. Unquantized, only with Run off (0.2.1: the keyboard then plays notes in every mode); with
@@ -873,9 +891,10 @@ private:
     {
         using namespace ParamId;
         // Run off, Unquantized (0.2.1): the keyboard transposes the CV too, so the pads play notes in every mode.
-        // cvShift is kept current by set() and note() (cold), not worked out here: the arithmetic added to this
-        // function cost a fifth more instructions a block, wherever it was put.
-        const float seq1 = seqCv (0) + cvShift, seq2 = seqCv (1) + cvShift;
+        // laneShift (cvShift and a pad's bank) is kept current by set(), note(), preview() and moveOn() (cold), not
+        // worked out here: the arithmetic added to this function cost a fifth more instructions a block, wherever it
+        // was put.
+        const float seq1 = seqCv (0) + laneShift[0], seq2 = seqCv (1) + laneShift[1];
         target[vcoPitch] = std::log2 (vcoLowHz) + knob[vcoFreq] * vcoOctaves + seq1 * seqAmtScale (knob[vcoSeq1Amt]);
         target[vcoEg] = knob[vcoEg1Amt] * egPitchOctaves;
         target[modPitch] = std::log2 (modLowHz) + knob[modFreq] * modOctaves + seq2 * seqAmtScale (knob[modSeq2Amt]);
@@ -1061,6 +1080,7 @@ private:
     bool rated = true;
     float transpose = 0.0f;
     float cvShift = 0.0f; // the transposition an Unquantized sequence gets with Run off, in octaves (retarget)
+    float laneShift[2] {}; // cvShift plus each CV output's pad bank octaves (retarget)
     int order = 0;
     bool droning = false, chained = false, silenced = false; // silenced: the host's silence holds until a strike
     bool playing = false, dirty = true, moving = false;

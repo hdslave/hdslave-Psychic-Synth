@@ -19,8 +19,9 @@ Built for the Akai MPC Sample running [Melodee](https://github.com/keremimo/melo
 
 Its sequencers lock tightly to the host transport and beat grid. Under **hdslaveOS**, Psychic draws its animated **Contact Sheet** screen comparing saved and live steps side by side with direct per-cell gate and voltage editing.
 
-Version 0.2.6. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
-(`clap_check`), but nobody has played it on the device yet.
+Version 0.3.0. Not yet run on the MPC: it is checked in Melodee's build image and loads in hdslaveOS's CLAP host
+(`clap_check`), but nobody has played it on the device yet. The 0.3.0 drum map and banks (below) have not been tried
+on the device either.
 
 ## Contact Sheet on the MPC Sample
 
@@ -146,28 +147,37 @@ The public CLAP parameter names and their panel equivalents are listed below.
 
 ### MIDI notes and pads
 
-- **Run on (the sequencer on): pads 1–16 play the steps**, whether the host plays or not. On an hdslaveOS plug-in
-  track at its default octave and key, pads A01–A16 send notes 36–51: pads 1–8 (notes 36–43) are SEQ 1's bits 1–8,
-  and pads 9–16 (notes 44–51) are SEQ 2's bits 1–8. With Chain Seq on, that is the ring's 16 bits in order.
+- **The pads are a drum map.** The plug-in carries a drum map that hdslaveOS (and Melodee) read from it. A Psychic
+  track plays its 16 pads as drums: pads A01–A16 always send notes 36–51, whatever the track's octave, key or scale.
+  The Keys page names them **S1 Bit 1**–**S1 Bit 8** (notes 36–43) and **S2 Bit 1**–**S2 Bit 8** (notes 44–51).
+- **− / + move the bank, not the octave.** Bank B sends 52–67, C 68–83, D 84–99 (and below A the same way down).
+  With Run on, every bank plays the same 16 step pads, an octave apart per bank: bank B an octave up, C two, D three.
+  Keys past D stay at three octaves up, and keys below A go at most two octaves down. Psychic reads a key this way
+  with Run on: its pad is (key − 36) mod 16 and its bank ⌊(key − 36) / 16⌋.
+- **Run on (the sequencer on): every pad plays its step**, whether the host plays or not, in every bank. Pads 1–8 are
+  SEQ 1's bits 1–8 and pads 9–16 SEQ 2's bits 1–8. With Chain Seq on, that is the ring's 16 bits in order.
 - A pad plays its bit as the sequencer would: that sequencer's CV output takes the bit's CV, through CV Range, the
   quantizer and the current transposition, and both envelopes fire at the pad's velocity. It does this whether the bit
   is on or off, and past the Length too. Chained, both CV outputs take it, as when both play heads are on that bit.
+  A pad of another bank adds its octaves to that CV output (in every Quantize mode, through the same Seq Amt as the
+  CV), so it is never another step and never silent.
 - A pad moves nothing else: not the play or write heads, the bits, their CVs or the transposition, and the host is
-  told of nothing. The bit's CV holds until that sequencer's next on bit plays.
-- Two pads in one block (Melodee sends them on one frame): for each sequencer the louder pad's CV wins (on a tie, the
-  later one), and the envelopes take the louder peak. A pad of each sequence gives each its own CV, as a step with
-  both bits on does. A pad on Play's frame sounds; if the step Play lands on is on, its CV replaces the pad's at once.
-- Every other note does what notes did before. As on the panel, it transposes the quantized sequences: each note moves
-  the scale's root by its distance from middle C (60), and the transposition holds until the next note. While the
-  sequences are not running (the host stopped), it also fires both envelopes at the note's velocity. A note on Play's
-  own frame counts as running (it only transposes); one on Stop's frame plays.
-- With Run on and Quantize at Unquantized, notes do not transpose, as on the panel (they still fire the envelopes where
-  they would). Pads still play their bits' CVs, unquantized.
-- **Run off (the sequencer off): the pads play notes.** Every note, the pads too, transposes as above and also fires
-  both envelopes at its velocity, so Psychic plays like a mono synth. This holds Unquantized too: there the note's
-  distance from middle C is added to the CV as it is, so pads 1, 2 and 13 (notes 36, 37 and 48) play a semitone and an
-  octave apart, with VCO Seq 1 Amt at QTZ. Switching Run on keeps the last note's transposition for when Run goes off
-  again, but Unquantized ignores it while Run is on.
+  told of nothing. The bit's CV, and its bank's octave, hold until that sequencer's next on bit plays.
+- Two pads in one block (Melodee sends them on one frame): for each sequencer the louder pad's CV and bank win (on a
+  tie, the later one), and the envelopes take the louder peak. A pad of each sequence gives each its own CV, as a step
+  with both bits on does. A pad on Play's frame sounds; if the step Play lands on is on, its CV replaces the pad's at
+  once.
+- **Run off (the sequencer off): every key plays its own note, exactly as in 0.2.6.** There are no banks. As on the
+  panel, the note transposes the quantized sequences by its distance from middle C (60), and the transposition holds
+  until the next note. It also fires both envelopes at its velocity, so Psychic plays like a mono synth. Bank B's pad 1
+  (key 52) is 16 semitones above pad A01 (36), as an outside keyboard or a recorded note plays it. This holds
+  Unquantized too: there the note's distance from middle C is added to the CV as it is, so pads 1, 2 and 13 (notes
+  36, 37 and 48) play a semitone and an octave apart, with VCO Seq 1 Amt at QTZ.
+- Switching Run on keeps the last Run-off note's transposition for the quantized modes, and for when Run goes off
+  again. Unquantized ignores it while Run is on, as on the panel.
+- What 0.3.0 replaced: before it, with Run on, the notes outside 36–51 transposed the sequences (and fired the
+  envelopes while stopped). Now they are step pads of the other banks, so with Run on only a note played with Run off
+  transposes. Run off is unchanged.
 
 ## Presets
 
@@ -219,12 +229,12 @@ these, so they are chosen to fit what it does document:
 - Corrupt's chances: a new CV with a chance of up to 25 % a step at 12 o'clock and 50 % at full; a flip with a chance
   from 0 at 12 o'clock to 50 % at full.
 - The sequencer's CV holds from one on bit to the next. Off bits leave it where it is.
-- MIDI notes transpose from middle C. A note's velocity sets its envelopes' peak.
+- MIDI notes (with Run off) transpose from middle C. A note's velocity sets its envelopes' peak.
 - With Run off, notes transpose Unquantized too, which the panel's keyboard input does not: with the sequencer off the
   pads always play notes, whatever the quantizer.
-- The step pads, which the panel does not have: notes 36–51, hdslaveOS's pads A01–A16 at its default octave and key.
-  A pad fires the envelopes at its own velocity, not through EG Trig Mix, so SEQ 2's bits sound even with the mix at
-  Seq 1. Chained, a pad's bit goes to both CV outputs.
+- The step pads, which the panel does not have: notes 36–51, hdslaveOS's pads A01–A16 (the drum map holds them
+  there), with − / +'s banks an octave apart. A pad fires the envelopes at its own velocity, not through EG Trig Mix,
+  so SEQ 2's bits sound even with the mix at Seq 1. Chained, a pad's bit goes to both CV outputs.
 - Depths: EG1 ±8 octaves on pitch and cutoff (its 8 V at 1 V/octave), through-zero FM index 4, about four folds
   at full Fold, a Q of 10 at full Resonance, Mod VCO 0.16 Hz at its lowest, EG decays to 8 s.
 - The scales behind the names Hirajoshi (1 2 b3 5 b6) and Minor 6-Note (1 2 b3 5 b6 b7). Major 13th and Minor 11th
@@ -300,8 +310,13 @@ The tests load the plug-in through the CLAP API and check:
   transposition scaled below QTZ and on SEQ 2's Mod VCO; with Run on, notes outside the pads still leaving the pitch and
   pads untransposed; Run switched over a held transposition (it goes and comes back), and on a note's frame (settings
   first); the same output at every block size;
+- the drum map (0.3.0): in the binary, 16 levels named and on notes 36–51 in order; the banks with Run on: pad 1 of
+  banks A–D, past D and below A measured (an octave a bank, at most three up and two down), pads of banks B, C and D an
+  octave, two and three above bank A's, SEQ 2's bank pad only moving SEQ 2, chained to both, Unquantized, two pads on
+  one frame, a bank pad's octave held to the next on bit and cleared by it; nothing heard back; the same output at every
+  block size; with Run off, keys in every bank measured at key − 60 as in 0.2.6 (52 sixteen semitones above 36);
 - the step pads: each of the 16, apart and chained, sounds to the bit as the sequencer playing its bit (stopped with
-  the bit on and off, playing with a transposition, on Play's frame for bit 1); pitches measured (quantized,
+  the bit on and off, playing, on Play's frame for bit 1); pitches measured (quantized,
   transposed, Unquantized, chained, Run off); a pad's CV held until that sequencer's next on bit; the play heads
   unmoved (playing, and stopped with Advance); nothing heard back, Bits and CVs unchanged; two pads on one frame (the
   louder wins, on a tie the later; one of each sequence as a step with both bits on; one pad twice plays once); on,
@@ -322,17 +337,23 @@ The tests load the plug-in through the CLAP API and check:
 - routing: Order and Blend (each path the same to the bit where it should be), Fold clean at 0, Noise Tone and Drone;
 - finite, bounded output at 60 random and extreme settings, buttons pressed.
 
-`tests/fingerprint.cpp` then renders 59 fixed scenarios and hashes every output sample's bits, and the values the
+`tests/fingerprint.cpp` then renders 63 fixed scenarios and hashes every output sample's bits, and the values the
 plug-in tells the host it changed, against `tests/fingerprint.txt`. The scenarios: each preset, the bench's patches,
 24 random patches with the buttons, MIDI and knobs moving, other block sizes and rates, stop and jumps, Corrupt
 across its turn, chained moves and the buffer, Clock 2 with Swing, notes, step pads (playing, chained, stopped, and
-with Run off as the keyboard), the keyboard Unquantized with Run switched off and on, each Order, and two-bar loops as Melodee plays them. Work meant to keep the
+with Run off as the keyboard), the drum map's banks (the same four ways), the keyboard Unquantized with Run switched
+off and on, each Order, and two-bar loops as Melodee plays them. Work meant to keep the
 sound, such as a speed-up, must leave every hash as it is. A change meant to change the sound updates them with
 `make fingerprint-update` (run inside the build image). The hashes hold for Melodee's build image and these compiler
 flags. Version 0.2.5 restores the 0.2.1 oscillator pitch rounding when Advance moves the stopped sequencers.
 All 59 fingerprints match that reference, including the four random patches that diverged in 0.2.2.
 The later panic, state-load and transport fixes keep their own host tests. Version 0.2.6 (the Drone after a silence, and a
-load waking a sleeping instance) leaves all 59 fingerprints as they were.
+load waking a sleeping instance) leaves all 59 fingerprints as they were. Version 0.3.0 (the drum map and its banks)
+moves the 23 scenarios that send a key outside 36–51 while Run is on, and no other. They are 13 random patches and
+random-0 at three block sizes (key 64), both notes scenarios, three step-pad scenarios (not the Run-off one) and both
+Unquantized keyboard scenarios (keys during their Run-on stretch). A build that logs such keys finds exactly these 23.
+The other 36 match 0.2.6. Four bank scenarios are new. The Run-off one (keys across every bank) renders the same on
+0.2.6 to the bit.
 
 ## Install
 

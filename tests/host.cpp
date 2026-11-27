@@ -19,6 +19,8 @@
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
+#include <fstream>
+#include <iterator>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -1508,19 +1510,19 @@ void testPitchAndQuantizer()
     CHECK (near (held ({ { "Seq 1 CV 1", 0.1 }, { "VCO Seq 1 Amt", 0.49 } }), root * std::exp2 (2.5 / 12.0)));
     // CV Range: the CV's reach (a quarter of it: +-1.25 octaves; CV 0.4 is half an octave again).
     CHECK (near (held ({ { "Seq 1 CV 1", 0.4 }, { "CV Range 1", 0.25 }, { "Quantize", 0.0 } }), root * std::exp2 (0.5)));
-    // A MIDI note transposes the quantized sequence: G above middle C, 7 semitones up; Unquantized, with Run on, it
-    // does not (with Run off it does since 0.2.1: testUnquantizedKeys).
+    // With Run off, a MIDI note transposes the quantized sequence by its distance from middle C: G above it 7 semitones
+    // up, 48 an octave down, 52 and 35 (off the pads) 8 and 25 semitones down. With Run on every key is a step pad
+    // (0.3.0, testDrumBanks): 67 (bank B's pad 16, SEQ 2's bit 8) leaves SEQ 1 where its step put it; Unquantized too.
     auto note = [] (int key) {
         return [key] (uint64_t at, uint32_t, Events& e) {
             if (at == 0) e.note (0, CLAP_EVENT_NOTE_ON, (int16_t) key, 1.0);
         };
     };
-    CHECK (near (held ({ { "Seq 1 CV 1", 0.0 } }, note (67)), root * std::exp2 (7.0 / 12.0)));
-    // Down an octave: with Run on, 48 is a step pad (0.2.0), so the octave below is played with Run off (every note
-    // transposes then), and with Run on by the notes just outside the pads (35 and 52).
+    CHECK (near (held ({ { "Seq 1 CV 1", 0.0 }, { "Run", 0.0 } }, note (67)), root * std::exp2 (7.0 / 12.0)));
     CHECK (near (held ({ { "Seq 1 CV 1", 0.0 }, { "Run", 0.0 } }, note (48)), root / 2.0));
-    CHECK (near (held ({ { "Seq 1 CV 1", 0.0 } }, note (35)), root * std::exp2 (-25.0 / 12.0)));
-    CHECK (near (held ({ { "Seq 1 CV 1", 0.0 } }, note (52)), root * std::exp2 (-8.0 / 12.0)));
+    CHECK (near (held ({ { "Seq 1 CV 1", 0.0 }, { "Run", 0.0 } }, note (52)), root * std::exp2 (-8.0 / 12.0)));
+    CHECK (near (held ({ { "Seq 1 CV 1", 0.0 }, { "Run", 0.0 } }, note (35)), root * std::exp2 (-25.0 / 12.0)));
+    CHECK (near (held ({ { "Seq 1 CV 1", 0.0 } }, note (67)), root));
     CHECK (near (held ({ { "Seq 1 CV 1", 0.0 }, { "Quantize", 0.0 } }, note (67)), root));
     // The Mod VCO at three quarters of its knob: 0.16 Hz * 2^9.75 = 138 Hz, alone, SEQ 2 at QTZ (its CV at 0).
     {
@@ -1923,11 +1925,13 @@ void testHostEdges()
         else
             CHECK (l == first);
     }
-    // A note on Play's first frame transposes but does not play (the sequences run from that frame); a note on Stop's
-    // first frame plays (they no longer run).
+    // With Run off (0.3.0: with Run on every key is a step pad, which plays), a note on Play's first frame and on
+    // Stop's first frame both play: the sequences do not run.
     {
         Instance a;
-        a.setup (clickPatch (a, 0));
+        auto v = clickPatch (a, 0);
+        v.push_back ({ "Run", 0.0 });
+        a.setup (v);
         a.render (48000, 128, l, r, [] (uint64_t at) {
             if (at < 12800) return Transport { false, 120.0, 0.0 };
             if (at < 25600) return playingFrom (0.0, 120.0, 48000.0, at - 12800);
@@ -1935,7 +1939,7 @@ void testHostEdges()
         }, [&] (uint64_t at, uint32_t, Events& e) {
             if (at == 12800 || at == 25600) e.note (0, CLAP_EVENT_NOTE_ON, 60, 1.0);
         });
-        CHECK ((onsets (l) == std::vector<long> { 25600 }));
+        CHECK ((onsets (l) == std::vector<long> { 12800, 25600 }));
     }
     // A Reset sent with Play sticks (Play places the heads, then the Reset moves them): bit 1 on the second step.
     {
@@ -2086,21 +2090,19 @@ void testStepPads()
 
     // Each pad against the sequencer playing its bit (that bit alone on, playing from the top, at its step's frame):
     // the pad pressed on that frame sounds the same, to the bit, and the host hears nothing. Stopped, with the bit on
-    // and with it off; playing with every bit off (only the pad sounds; for bit 1 that is Play's own frame), both
-    // transposed a fifth by a note outside the pads at the top (playing, it transposes without sounding); and chained
-    // (the ring's bit k, on both outputs, as both heads together play it).
+    // and with it off; playing with every bit off (only the pad sounds; for bit 1 that is Play's own frame); and chained
+    // (the ring's bit k, on both outputs, as both heads together play it). (Before 0.3.0 the playing case was also
+    // transposed by a note outside the pads; with Run on every key is a pad now: testDrumBanks.)
     int matched = 0, cases = 0;
     for (int chained = 0; chained < 2; ++chained)
         for (int k = 0; k < 16; ++k)
-            for (int variant = 0; variant < 3; ++variant) // stopped and on; stopped and off; playing, all off, transposed
+            for (int variant = 0; variant < 3; ++variant) // stopped and on; stopped and off; playing, all off
             {
                 const int lane = k >> 3, one = 1 << (k & 7);
                 const uint64_t at = 6000u * (uint64_t) (chained ? k : k & 7);
                 const uint32_t frames = (uint32_t) at + 6000;
                 const double mix = chained ? 0.5 : (lane == 0 ? 0.0 : 1.0);
                 std::vector<Hit> top;
-                if (variant == 2)
-                    top.push_back ({ 0, 67 });
                 {
                     Instance a;
                     a.setup (patch (a, lane == 0 ? one : 0, lane == 1 ? one : 0, mix, chained));
@@ -2149,17 +2151,18 @@ void testStepPads()
         return hz;
     };
     const auto all = std::vector<std::pair<size_t, size_t>> { { 4000, 46000 }, { 52000, 94000 } };
-    // Stopped: pad 38 (SEQ 1's bit 3) plays its CV, quantized; after a note outside the pads (67, a fifth) transposed.
+    // Stopped: pad 38 (SEQ 1's bit 3) plays its CV, quantized; transposed a fifth by a note played with Run off (67;
+    // 0.3.0: with Run on every key is a pad), Run then switched on.
     auto hz = pitches ({}, { { 0, 38 } }, all, stopped);
     CHECK (near (hz[0], root * std::exp2 (5.0 / 12.0)) && near (hz[1], root * std::exp2 (5.0 / 12.0)));
-    hz = pitches ({}, { { 0, 67 }, { 0, 38 } }, all, stopped);
+    hz = pitches ({ { "Run", 0.0 } }, { { 0, 67 }, { 2000, 38 } }, all, stopped, { { 1000, "Run" } });
     CHECK (near (hz[0], root * 2.0));
     // A pad never transposes: after the fifth, pad 50 (SEQ 2's bit 7) leaves SEQ 1 and the transposition as they were.
-    hz = pitches ({}, { { 0, 67 }, { 48000, 50 } }, all, stopped);
+    hz = pitches ({ { "Run", 0.0 } }, { { 0, 67 }, { 48000, 50 } }, all, stopped, { { 1000, "Run" } });
     CHECK (near (hz[0], root * std::exp2 (7.0 / 12.0)) && near (hz[1], root * std::exp2 (7.0 / 12.0)));
-    // Unquantized: the CV as it is (6 semitones), and with Run on notes do not transpose (as before 0.2.0; with Run off
-    // they do since 0.2.1: testUnquantizedKeys).
-    hz = pitches ({ { "Quantize", 0.0 } }, { { 0, 67 }, { 0, 38 } }, all, stopped);
+    // Unquantized: the CV as it is (6 semitones), and with Run on the transposition is not heard (with Run off it is
+    // since 0.2.1: testUnquantizedKeys).
+    hz = pitches ({ { "Quantize", 0.0 }, { "Run", 0.0 } }, { { 0, 67 }, { 2000, 38 } }, all, stopped, { { 1000, "Run" } });
     CHECK (near (hz[0], root * std::exp2 (6.0 / 12.0)));
     // SEQ 2's pads move only SEQ 2 apart; chained, the ring's bit goes to both outputs (SEQ 2's bit 1 at CV 0.2: up an
     // octave on the VCO too).
@@ -2433,12 +2436,13 @@ void testUnquantizedKeys()
         CHECK (near (pitches (l, { { 4000, 46000 } })[0], mod / 2.0));
     }
 
-    // Run on, Unquantized: the notes outside the step pads still leave the pitch alone, stopped (they play) and playing
-    // (bit 1, CV 0, on every step); and a step pad plays its bit's CV as it is, untransposed: pad 36 (CV 0.1, 6 semitones)
-    // after note 52.
+    // Run on, Unquantized: no key transposes (0.3.0: every key is a step pad). SEQ 2's pad 16 in four banks (35, 67,
+    // 83, 99) leaves SEQ 1's pitch alone, stopped (they play) and playing (bit 1, CV 0, on every step); and a step pad
+    // plays its bit's CV as it is, untransposed: pad 36 (CV 0.1, 6 semitones) after bank B's pad 1 (52) on its frame
+    // (the same velocity: the later pad's CV and bank).
     for (bool playing : { false, true })
     {
-        play (vco ({ { "Run", 1.0 } }), { { 0, 35 }, { 24000, 52 }, { 48000, 67 }, { 72000, 72 } }, playing ? from0 : stopped, 96000, l);
+        play (vco ({ { "Run", 1.0 } }), { { 0, 35 }, { 24000, 67 }, { 48000, 83 }, { 72000, 99 } }, playing ? from0 : stopped, 96000, l);
         const auto hz = pitches (l, quarters);
         CHECK (near (hz[0], root) && near (hz[1], root) && near (hz[2], root) && near (hz[3], root));
     }
@@ -2455,8 +2459,8 @@ void testUnquantizedKeys()
         CHECK (near (hz[0], root / 2.0) && near (hz[1], root) && near (hz[2], root / 2.0));
     }
     // Settings on a frame come before its notes: Run switched off with a note (sent first) on one frame makes it the
-    // keyboard's, transposing, as with Run off all along; switched on with note 52 (outside the pads), the note leaves
-    // the pitch, as with Run on all along. To the bit.
+    // keyboard's, transposing, as with Run off all along; switched on with note 52 (bank B's pad 1: SEQ 1's bit 1, CV 0,
+    // an octave up, 0.3.0), it is a step pad, as with Run on all along. To the bit.
     {
         std::vector<float> switched, along;
         play (vco ({ { "Run", 1.0 } }), { { 12800, 37 }, { 12800, -1, "Run", 0.0 } }, stopped, 36000, switched);
@@ -2464,7 +2468,7 @@ void testUnquantizedKeys()
         CHECK (switched == along && near (pitches (switched, { { 16000, 34000 } })[0], root * semis (-23.0)));
         play (vco(), { { 12800, 52 }, { 12800, -1, "Run", 1.0 } }, stopped, 36000, switched);
         play (vco ({ { "Run", 1.0 } }), { { 12800, 52 } }, stopped, 36000, along);
-        CHECK (switched == along && near (pitches (switched, { { 16000, 34000 } })[0], root));
+        CHECK (switched == along && near (pitches (switched, { { 16000, 34000 } })[0], root * 2.0));
     }
 
     // The same output whatever the block size (1, 37, 128, 4096 frames): both sequences heard, Unquantized, Run off;
@@ -2494,6 +2498,185 @@ void testUnquantizedKeys()
             same &= l == at128;
         }
         CHECK (same && std::count_if (at128.begin(), at128.end(), [] (float x) { return x != 0.0f; }) > 20000);
+    }
+}
+
+// 0.3.0: the drum map. The .clap carries Melodee's drum-map JSON (as a plug-in library has it), so hdslaveOS plays a
+// Psychic track's pads as drums, notes 36-51 whatever the octave, key or scale, and names them: 16 levels, each a name
+// and a note, 36-51 in order.
+void testPadMap (const char* path)
+{
+    std::ifstream f (path, std::ios::binary);
+    const std::string bytes ((std::istreambuf_iterator<char> (f)), std::istreambuf_iterator<char>());
+    const size_t at = bytes.find ("{\"pad_layout\":\"drums\"");
+    CHECK (at != std::string::npos);
+    if (at == std::string::npos)
+        return;
+    const std::string json = bytes.substr (at, bytes.find ('\0', at) - at);
+    CHECK (json.find ("\"name\":\"hdslave Psychic\"") != std::string::npos && json.find ("\"levels\":{") != std::string::npos);
+    // Each level as Melodee reads one: {"name":"...","note":N}; balanced braces, nothing after the map.
+    int levels = 0, depth = 0, deepest = 0;
+    bool inOrder = true;
+    for (size_t from = json.find ("{\"name\":\""); from != std::string::npos; from = json.find ("{\"name\":\"", from + 1))
+    {
+        const size_t note = json.find ("\",\"note\":", from);
+        const size_t close = json.find ('}', from);
+        if (note == std::string::npos || close == std::string::npos || note > close)
+            break;
+        const std::string name = json.substr (from + 9, note - from - 9);
+        const int key = std::atoi (json.c_str() + note + 9);
+        inOrder &= key == 36 + levels && ! name.empty() && name.size() <= 12;
+        ++levels;
+    }
+    for (char c : json)
+    {
+        depth += c == '{' ? 1 : c == '}' ? -1 : 0;
+        deepest = std::max (deepest, depth);
+    }
+    CHECK (levels == 16 && inOrder && depth == 0 && deepest == 3 && json.back() == '}');
+    CHECK (json.find ("S1 Bit 1") != std::string::npos && json.find ("S2 Bit 8") != std::string::npos);
+}
+
+// 0.3.0: the banks. hdslaveOS's - / + move a drum track's bank 16 keys (B 52-67, C 68-83, D 84-99). With Run on, every
+// bank is the same 16 step pads an octave a bank apart (A-D 0-3 octaves up; at most two down and three up): a pad of
+// any bank plays its step (52 SEQ 1's bit 1, as 36 does) with the bank's octaves on that CV output, held with the CV
+// until the sequencer's next on bit. With Run off there are no banks: every key is its own note, as before 0.3.0.
+void testDrumBanks()
+{
+    using psychic::padOf;
+    CHECK (padOf (36).slot == 0 && padOf (36).semitones == 0 && padOf (51).slot == 15 && padOf (51).semitones == 0);
+    CHECK (padOf (52).slot == 0 && padOf (52).semitones == 12 && padOf (68).slot == 0 && padOf (68).semitones == 24);
+    CHECK (padOf (84).slot == 0 && padOf (84).semitones == 36 && padOf (99).slot == 15 && padOf (99).semitones == 36);
+    CHECK (padOf (100).slot == 0 && padOf (100).semitones == 36 && padOf (127).semitones == 36);
+    CHECK (padOf (35).slot == 15 && padOf (35).semitones == -12 && padOf (20).slot == 0 && padOf (0).semitones == -24);
+    bool slots = true;
+    for (int key = 0; key < 128; ++key)
+        slots &= padOf (key).slot >= 0 && padOf (key).slot < 16 && (key - 36 - padOf (key).slot) % 16 == 0;
+    CHECK (slots);
+
+    std::vector<float> l, r, want, wantR;
+    struct Hit { uint64_t when; int key; double velocity = 1.0; };
+    auto pitches = [&] (Values extra, std::vector<Hit> list, std::vector<std::pair<size_t, size_t>> windows,
+                        const std::function<Transport (uint64_t)>& transport, OutEvents* out = nullptr) {
+        Instance a;
+        // The VCO alone, held open by Drone, SEQ 1 at full CV Range in Major (CV 0.1: 5 semitones; 0.2 an octave).
+        Values v { { "Drone", 1.0 }, { "VCO Freq", 0.5 }, { "VCO Level", 0.5 }, { "Mod VCO Level", 0.0 }, { "FM Amt", 0.0 }, { "Fold", 0.0 },
+                   { "VCW EG1 Amt", 0.0 }, { "VCO EG1 Amt", 0.0 }, { "Blend", 0.0 }, { "CV Range 1", 1.0 },
+                   { "Quantize", a.valueOf ("Quantize", "Major") }, { "Seq 1 CV 1", 0.1 }, { "Seq 1 CV 4", 0.2 }, { "Seq 1 CV 5", -0.2 },
+                   { "Seq 2 CV 1", 0.2 } };
+        v.insert (v.end(), extra.begin(), extra.end());
+        a.setup (v);
+        a.render (96000, 128, l, r, transport, [&] (uint64_t at, uint32_t n, Events& e) {
+            for (const auto& h : list)
+                if (h.when >= at && h.when < at + n)
+                    e.note ((uint32_t) (h.when - at), CLAP_EVENT_NOTE_ON, (int16_t) h.key, h.velocity);
+        }, out);
+        std::vector<double> hz;
+        for (const auto& [from, to] : windows)
+            hz.push_back (frequency (l, from, to));
+        if (debug())
+        {
+            std::printf ("debug drum banks:");
+            for (double h : hz) std::printf (" %.1f", h);
+            std::printf ("\n");
+        }
+        return hz;
+    };
+    const double root = 320.0;
+    auto near = [] (double hz, double target) { return std::fabs (hz / target - 1.0) < 0.002; };
+    auto semis = [] (double s) { return std::exp2 (s / 12.0); };
+    const auto whole = std::vector<std::pair<size_t, size_t>> { { 4000, 90000 } };
+
+    // Run on, stopped: pad 1 of banks A, B, C, D, the one past D (clamped to D's) and two below A: SEQ 1's bit 1 (5
+    // semitones), 0, 1, 2, 3, 3 and -1, -2 octaves; never another step, never silence. Each reports nothing to the host.
+    const std::vector<std::pair<int, double>> pad1 { { 36, 5.0 }, { 52, 17.0 }, { 68, 29.0 }, { 84, 41.0 }, { 100, 41.0 }, { 20, -7.0 },
+                                                     { 4, -19.0 } };
+    for (const auto& [key, semitones] : pad1)
+    {
+        OutEvents out;
+        const auto hz = pitches ({}, { { 0, key } }, whole, stopped, &out);
+        CHECK (near (hz[0], root * semis (semitones)) && out.values.empty());
+    }
+    // Every bank's pad is bank A's pad an octave a bank up: SEQ 1's bit 4 (CV 0.2, an octave) on pads 39, 55, 71, 87.
+    {
+        const auto a = pitches ({}, { { 0, 39 } }, whole, stopped)[0];
+        const auto b = pitches ({}, { { 0, 55 } }, whole, stopped)[0];
+        const auto c = pitches ({}, { { 0, 71 } }, whole, stopped)[0];
+        const auto d = pitches ({}, { { 0, 87 } }, whole, stopped)[0];
+        CHECK (near (a, root * 2.0) && near (b, a * 2.0) && near (c, a * 4.0) && near (d, a * 8.0));
+    }
+    // SEQ 2's pads in bank B (60: SEQ 2's bit 1) move only SEQ 2; chained, both outputs take the ring's bit and its
+    // octave (SEQ 2's bit 1 at CV 0.2, an octave, plus bank B's: two octaves on the VCO).
+    CHECK (near (pitches ({}, { { 0, 60 } }, whole, stopped)[0], root));
+    CHECK (near (pitches ({ { "Chain Seq", 1.0 } }, { { 0, 60 } }, whole, stopped)[0], root * 4.0));
+    // In every Quantize mode: Unquantized, the CV as it is (6 semitones) plus the bank's octave.
+    CHECK (near (pitches ({ { "Quantize", 0.0 } }, { { 0, 52 } }, whole, stopped)[0], root * semis (18.0)));
+    // Two pads on one frame, one output: the louder pad's CV and bank (the softer bank-C pad first or last).
+    CHECK (near (pitches ({}, { { 0, 68, 0.4 }, { 0, 39, 1.0 } }, whole, stopped)[0], root * 2.0));
+    CHECK (near (pitches ({}, { { 0, 39, 1.0 }, { 0, 68, 0.4 } }, whole, stopped)[0], root * 2.0));
+    // Playing (bits 1 and 5 on, at 1/8): bank B's pad 4 (55: bit 4, an octave, up one more) in step 2 holds through the
+    // off steps 3 and 4, and step 5 replaces it, its octave too (CV -0.2: an octave down, not up). The Bits and CVs
+    // the host knows are as they were.
+    {
+        OutEvents out;
+        const auto hz = pitches ({ { "Bits 1", 1 + 16 } }, { { 18000, 55 } }, { { 2000, 17000 }, { 20000, 29000 }, { 32000, 46000 }, { 50000, 70000 } },
+                                 from0, &out);
+        CHECK (near (hz[0], root * semis (5.0)) && near (hz[1], root * 4.0) && near (hz[2], root * 4.0) && near (hz[3], root / 2.0));
+        CHECK (out.values.empty());
+    }
+    // The same to the bit, whatever the bank, as bank A for the envelopes: with CV Range 0 and Seq Amts 0 no CV is heard,
+    // so pads 36, 52, 68, 84 and 20 strike the same sound.
+    {
+        auto strike = [&] (int key, std::vector<float>& out) {
+            Instance a;
+            a.setup ({ { "VCO Seq 1 Amt", 0.0 }, { "Mod VCO Seq 2 Amt", 0.0 }, { "VCW Seq 1 Amt", 0.0 }, { "VCF Seq 2 Amt", 0.0 }, { "EG2 Decay", 0.3 } });
+            a.render (24000, 128, out, r, stopped, [&] (uint64_t at, uint32_t, Events& e) {
+                if (at == 1280) e.note (0, CLAP_EVENT_NOTE_ON, (int16_t) key, 0.8);
+            });
+        };
+        strike (36, want);
+        bool same = onsets (want) == std::vector<long> { 1280 };
+        for (int key : { 52, 68, 84, 20 })
+        {
+            strike (key, l);
+            same &= l == want;
+        }
+        CHECK (same);
+    }
+
+    // Run off (the sequencer off): no banks. Every key is its own note, exactly as before 0.3.0: it transposes by key -
+    // 60, so bank B's pad 1 (52) is 8 semitones down, 16 above pad A01 (36); 68, 84 and 99 (banks C and D) 8, 24 and 39
+    // up; 35 and 30 below the pads 25 and 30 down. (The fingerprint's banks-run-off scenario holds it to the bit.)
+    for (const auto& [key, semitones] : std::vector<std::pair<int, double>> { { 36, -24.0 }, { 52, -8.0 }, { 68, 8.0 }, { 84, 24.0 }, { 99, 39.0 },
+                                                                            { 35, -25.0 }, { 30, -30.0 } })
+        CHECK (near (pitches ({ { "Run", 0.0 }, { "Seq 1 CV 1", 0.0 } }, { { 0, key } }, whole, stopped)[0], root * semis (semitones)));
+    {
+        const auto a = pitches ({ { "Run", 0.0 }, { "Seq 1 CV 1", 0.0 } }, { { 0, 36 } }, whole, stopped)[0];
+        const auto b = pitches ({ { "Run", 0.0 }, { "Seq 1 CV 1", 0.0 } }, { { 0, 52 } }, whole, stopped)[0];
+        CHECK (near (b, a * semis (16.0)));
+    }
+
+    // The same output whatever the block size, banks on steps' frames and between them, two on one frame, playing.
+    {
+        auto run = [&] (uint32_t block, std::vector<float>& out) {
+            Instance a;
+            a.setup ({ { "Clock Div", a.valueOf ("Clock Div", "1/16") }, { "Bits 1", 0x5a }, { "Bits 2", 0xa5 }, { "EG Trig Mix", 0.5 },
+                       { "Corrupt 1", 0.5 }, { "CV Range 1", 0.5 }, { "CV Range 2", 0.5 } });
+            const std::vector<Hit> list { { 6000, 52 }, { 9000, 71, 0.6 }, { 12000, 84 }, { 12000, 20, 0.9 }, { 30001, 99 }, { 45000, 3 }, { 60000, 127 } };
+            a.render (72000, block, out, r, from0, [&] (uint64_t at, uint32_t n, Events& e) {
+                for (const auto& h : list)
+                    if (h.when >= at && h.when < at + n)
+                        e.note ((uint32_t) (h.when - at), CLAP_EVENT_NOTE_ON, (int16_t) h.key, h.velocity);
+            });
+        };
+        run (128, want);
+        bool same = true;
+        for (uint32_t block : { 1u, 37u, 4096u })
+        {
+            run (block, l);
+            same &= l == want;
+        }
+        CHECK (same);
     }
 }
 
@@ -2780,6 +2963,8 @@ int main (int argc, char** argv)
     testHostEdges();
     testStepPads();
     testUnquantizedKeys();
+    testPadMap (argv[1]);
+    testDrumBanks();
     testScreen();
     testScreenPressSleep();
     testExtremes();

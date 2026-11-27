@@ -197,6 +197,27 @@ std::vector<Scenario> scenarios()
             s.transport = [] (uint64_t, double, double) -> std::pair<bool, double> { return { false, 0.0 }; };
         list.push_back (s);
     }
+    // 0.3.0: the drum map's banks (hdslaveOS's - / + move a drum track's pads 16 keys): with Run on every bank's pad is
+    // bank A's step pad, an octave a bank apart (playing, chained, stopped); with Run off every key is its own note, as
+    // in 0.2.6 (this one's hash is 0.2.6's). Banks B, C, D, past D and below A, two on one frame.
+    const std::vector<std::pair<uint64_t, int>> banks { { 3000, 52 }, { 12000, 68 }, { 12000, 39 }, { 30001, 84 }, { 36000, 99 },
+                                                        { 47000, 20 }, { 47000, 20 }, { 60000, 4 }, { 72000, 113 }, { 84000, 59 },
+                                                        { 99999, 0 }, { 120000, 127 }, { 120000, 61 }, { 150000, 76 }, { 170000, 44 } };
+    for (const char* key : { "banks-playing", "banks-chained", "banks-stopped", "banks-run-off" })
+    {
+        const std::string name = key;
+        Scenario s;
+        s.name = name;
+        s.preset = name == "banks-chained" ? "chain-melody" : "fold-bass";
+        s.seconds = 4.0;
+        for (const auto& [frame, key] : banks)
+            s.events.push_back ({ frame, Event::noteOn, "", (double) key });
+        if (name == "banks-stopped")
+            s.transport = [] (uint64_t, double, double) -> std::pair<bool, double> { return { false, 0.0 }; };
+        if (name == "banks-run-off")
+            s.values = { { "Run", 0.0 } };
+        list.push_back (s);
+    }
     return list;
 }
 } // namespace
