@@ -43,3 +43,7 @@ Read `../AGENTS.md`, then `../Workflow/plugins.md` and `../Workflow/host-facts.m
 - The Save/Recall buffer is a `BUFR` trailer in the state.
 - The fingerprint's random scenarios draw for a fixed parameter list (`order01`). Add a new list when adding parameters.
 - **Pads.** With Run on (playing or stopped), notes 36-51 are step pads (`Engine::preview`): 36-43 SEQ 1's bits, 44-51 SEQ 2's (chained: both CV outputs), the bit's CV plus both EGs at the velocity, moving no head and reporting nothing. Other notes transpose (and strike when not running) as before; with Run off every note transposes, Unquantized too (`cvShift`, kept current by `set()` and `note()` — work it out in `seqCv` or `retarget` and the per-sample loop costs a fifth more), so the pads play notes.
+
+## Release packaging
+
+Every release ZIP includes the full repository `LICENSE.txt` beside the third-party notices, outside signed plug-in bundles. Preserve both when packaging the plug-in for another project.
