@@ -43,3 +43,7 @@ Read `../AGENTS.md`, then `../Workflow/plugins.md` and `../Workflow/host-facts.m
 - The Save/Recall buffer is a `BUFR` trailer in the state.
 - The fingerprint's random scenarios draw for a fixed parameter list (`order01`). Add a new list when adding parameters.
 - **Pads.** The .clap embeds Melodee's drum-map JSON (`padMapJson` in `src/psychic.cpp`, kept by `padsJson()`), so hdslaveOS plays a Psychic track's pads as drums: A01-A16 send 36-51 whatever the octave, key or scale, and - / + move the bank 16 keys. With Run on (playing or stopped), every key is a step pad (`Engine::preview`), read through `padOf` (`src/params.h`): pad = (key-36) mod 16, bank = floor((key-36)/16), clamped to -2..+3 octaves (banks A-D are 0-3 up). 36-43 are SEQ 1's bits, 44-51 SEQ 2's (chained: both CV outputs): the bit's CV plus the bank's octaves (`Lane::octaves`, held with the CV until the next on bit) and both EGs at the velocity, moving no head and reporting nothing. With Run off there are no banks: every key transposes by key - 60 (Unquantized too, `cvShift`) and strikes, to the bit as 0.2.6. Where a key played a pitch before, keep it playing exactly that. `laneShift` holds `cvShift` plus each lane's octaves and is kept current by `set()`, `note()`, `preview()` and `moveOn()`: working it out in `seqCv` or `retarget` makes the per-sample loop cost a fifth more.
+
+## Release packaging
+
+Every release ZIP includes the full repository `LICENSE.txt` beside the third-party notices, outside signed plug-in bundles. Preserve both when packaging the plug-in for another project.

@@ -23,6 +23,10 @@ Version 0.3.0. Not yet run on the MPC: it is checked in Melodee's build image an
 (`clap_check`), but nobody has played it on the device yet. The 0.3.0 drum map and banks (below) have not been tried
 on the device either.
 
+## hdslave plug-in license
+
+You may use these plug-ins to make, perform, record and sell music, including paid client work, without royalties or credit to hdslave. You may share complete, unchanged official releases for free with their notices intact. Selling the software, including it in a paid product or subscription, or distributing a modified version requires prior written permission from hdslave. Third-party components keep their own licenses. [Full plug-in license](LICENSE.txt).
+
 ## Contact Sheet on the MPC Sample
 
 In hdslaveOS, open Psychic in Melodee's Edit or Stage plug-in page. Each frame in the two film strips is a step.
