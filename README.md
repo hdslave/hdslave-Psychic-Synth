@@ -8,8 +8,8 @@
     <th width="66%">macOS and Windows · CLAP</th>
   </tr>
   <tr>
-    <td align="center"><a href="docs/psychic-screen.gif"><img src="docs/psychic-screen.gif" alt="Psychic Contact Sheet animated screen running in hdslaveOS"></a></td>
-    <td align="center"><a href="mac-clap/assets/desktop-preview.gif"><img src="mac-clap/assets/desktop-preview.gif" alt="Psychic sequencers and voltage displays during playback"></a></td>
+    <td align="center"><a href="docs/psychic-screen.webp"><img src="docs/psychic-screen.webp" alt="Psychic running both sequencers and editing a step voltage in hdslaveOS"></a></td>
+    <td align="center"><a href="mac-clap/assets/desktop-preview.webp"><img src="mac-clap/assets/desktop-preview.webp" alt="Psychic sequencers and voltage displays during playback"></a></td>
   </tr>
 </table>
 
@@ -31,7 +31,7 @@ the step voltage. Select **Save** to print the pattern on the left. Pink underli
 on the punch card mark cells whose gate or voltage differs. **Recall** restores the saved sequencer settings.
 During playback, the ring around the eye spins once every four quarter notes at the project tempo.
 
-![Psychic's Contact Sheet and cell editor in Melodee](docs/contact-sheet.png)
+[![Psychic opening a cell, changing its voltage and returning to the running sequencers](docs/psychic-screen.webp)](docs/contact-sheet.png)
 
 | View | Wheel and push | K1 | K2 | K3 |
 |---|---|---|---|---|
